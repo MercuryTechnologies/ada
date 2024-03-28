@@ -23,7 +23,7 @@ executable ada
     , http-client-tls
     , servant
     , servant-client
-    , optparse-generic
+    , optparse-applicative
     , string-interpolate
     , text
     , vector

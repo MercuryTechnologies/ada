@@ -1,7 +1,5 @@
+{-# LANGUAGE ApplicativeDo      #-}
 {-# LANGUAGE BlockArguments     #-}
-{-# LANGUAGE DeriveAnyClass     #-}
-{-# LANGUAGE DeriveGeneric      #-}
-{-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE OverloadedLists    #-}
 {-# LANGUAGE OverloadedStrings  #-}
 {-# LANGUAGE QuasiQuotes        #-}
@@ -11,19 +9,31 @@
 
 module Main where
 
+import Control.Applicative (many)
 import Control.Exception (Exception)
 import Control.Monad.IO.Class (liftIO)
+import Data.Foldable (forM_)
 import Data.String.Interpolate (__i)
 import Data.Text (Text)
-import GHC.Generics (Generic)
-import OpenAI (CompletionRequest(..), Message(..))
-import Options.Generic (ParseRecord(..))
+import Data.Vector (Vector)
+import Options.Applicative (Parser, ParserInfo, ParserPrefs(..))
 import Servant.API ((:<|>)(..))
 
+import OpenAI
+    ( Choice(..)
+    , CompletionRequest(..)
+    , CompletionResponse(..)
+    , EmbeddingRequest(..)
+    , Message(..)
+    )
+
 import qualified Control.Exception as Exception
+import qualified Data.Text as Text
+import qualified Data.Text.IO as Text.IO
+import qualified Data.Vector as Vector
 import qualified Network.HTTP.Client.TLS as TLS
 import qualified OpenAI
-import qualified Options.Generic
+import qualified Options.Applicative as Options
 import qualified Servant.Client as Client
 
 example :: Text
@@ -60,10 +70,61 @@ Write `zsh` configuration? ([y]es, [n]o, yes to [a]ll) y
 Once I ran `eval "$(fnm env --use-on-cd)"` in my shell, it worked again. So I just wanted to raise that in case it’s something that bootstrap-mercury should do in general rather than an issue idiosyncratic to my scenario
 |]
 
+data Mode = Index{ paths :: Vector FilePath } | Query
+
+parsePath :: Parser FilePath
+parsePath =
+    Options.strArgument
+        (   Options.metavar "FILE"
+        <>  Options.action "file"
+        )
+
+parseIndex :: Parser Mode
+parseIndex = do
+    paths <- fmap Vector.fromList (many parsePath)
+
+    return Index{..}
+
+parseIndexInfo :: ParserInfo Mode
+parseIndexInfo =
+    Options.info
+        parseIndex
+        (Options.progDesc "Generate the index for the AI assistant")
+
+parseQuery :: Parser Mode
+parseQuery = pure Query
+
+parseQueryInfo :: ParserInfo Mode
+parseQueryInfo =
+    Options.info
+        parseQuery
+        (Options.progDesc "Ask the AI assistant a question")
+
 data Options = Options
     { openAIAPIKey :: Text
-    } deriving stock (Generic)
-      deriving anyclass (ParseRecord)
+    , mode :: Mode
+    }
+
+parseOptions :: Parser Options
+parseOptions = do
+    openAIAPIKey <- Options.strOption
+        (   Options.long "openai-key"
+        <>  Options.help "OpenAI API key"
+        <>  Options.metavar "KEY"
+        )
+
+    mode <- Options.hsubparser
+        (   Options.command "index" parseIndexInfo
+        <>  Options.command "query" parseQueryInfo
+        )
+
+    return Options{..}
+
+parseOptionsInfo :: ParserInfo Options
+parseOptionsInfo =
+    Options.info
+        (Options.helper <*> parseOptions)
+        (Options.progDesc "A helpful AI assistant for Mercury engineers")
 
 throws :: Exception e => IO (Either e a) -> IO a
 throws io = do
@@ -73,9 +134,16 @@ throws io = do
         Left  clientError -> Exception.throwIO clientError
         Right x           -> return x
 
+parserPrefs :: ParserPrefs
+parserPrefs = Options.defaultPrefs
+    { prefMultiSuffix = "..."
+    , prefShowHelpOnError = True
+    , prefHelpShowGlobal = True
+    }
+
 main :: IO ()
 main = do
-    Options{..} <- Options.Generic.getRecord "A helpful AI assistant for Mercury engineers"
+    Options{..} <- Options.customExecParser parserPrefs parseOptionsInfo
 
     manager <- TLS.newTlsManager
 
@@ -83,28 +151,59 @@ main = do
 
     let clientEnv = Client.mkClientEnv manager baseUrl
 
-    let (_embeddings :<|> completions) = OpenAI.getClient header
+    let (embeddings :<|> completions) = OpenAI.getClient header
           where
             header = "Bearer " <> openAIAPIKey
 
-    let clientM = do
-            let completionRequest = CompletionRequest{..}
-                  where
-                   message = Message{..}
-                     where
-                       role = "user"
+    let clientM = case mode of
+            Index paths -> do
+                forM_ paths \path -> do
+                    input <- liftIO (Text.IO.readFile path)
 
-                       content = example
+                    let model = "text-embedding-3-large"
 
-                   messages = [ message ]
+                    let embeddingRequest = EmbeddingRequest{..}
 
-                   max_tokens = Just 1024
+                    embeddingResponse <- embeddings embeddingRequest
 
-                   model = "gpt-4"
+                    liftIO (print embeddingResponse)
+            Query -> do
+                let completionRequest = CompletionRequest{..}
+                      where
+                       message = Message{..}
+                         where
+                           role = "user"
 
-            completionResponse <- completions completionRequest
+                           content = example
 
-            liftIO (print completionResponse)
+                       messages = [ message ]
+
+                       max_tokens = Just 1024
+
+                       model = "gpt-4"
+
+                CompletionResponse{..} <- completions completionRequest
+
+                let toContent :: Choice -> Text
+                    toContent Choice{ message = Message{..} } = content
+
+                let toChunk :: Int -> Choice -> Text
+                    toChunk index choice = [__i|
+                        Choice \##{index}:
+
+                        #{toContent choice}
+                    |]
+
+                liftIO case choices of
+                    [ choice ] -> do
+                        Text.IO.putStrLn (toContent choice)
+                    _ -> do
+                        let chunks = Vector.imap toChunk choices
+
+                        let text =
+                                Text.intercalate "\n\n" (Vector.toList chunks)
+
+                        Text.IO.putStr text
 
     result <- Client.runClientM clientM clientEnv
 
