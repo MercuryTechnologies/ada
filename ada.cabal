@@ -15,13 +15,16 @@ source-repository head
 
 executable ada
   main-is: Main.hs
+  other-modules: OpenAI
   build-depends:
       base >=4.7 && <5
-    , bytestring
+    , aeson
     , http-client
     , http-client-tls
-    , openai-hs
+    , servant
+    , servant-client
     , optparse-generic
     , string-interpolate
     , text
+    , vector
   default-language: Haskell2010

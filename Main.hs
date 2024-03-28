@@ -1,6 +1,8 @@
+{-# LANGUAGE BlockArguments     #-}
 {-# LANGUAGE DeriveAnyClass     #-}
 {-# LANGUAGE DeriveGeneric      #-}
 {-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE OverloadedLists    #-}
 {-# LANGUAGE OverloadedStrings  #-}
 {-# LANGUAGE QuasiQuotes        #-}
 {-# LANGUAGE RecordWildCards    #-}
@@ -9,16 +11,20 @@
 
 module Main where
 
-import Data.ByteString (ByteString)
+import Control.Exception (Exception)
+import Control.Monad.IO.Class (liftIO)
 import Data.String.Interpolate (__i)
 import Data.Text (Text)
 import GHC.Generics (Generic)
-import OpenAI.Client (EngineId(..))
+import OpenAI (CompletionRequest(..), Message(..))
 import Options.Generic (ParseRecord(..))
+import Servant.API ((:<|>)(..))
 
+import qualified Control.Exception as Exception
 import qualified Network.HTTP.Client.TLS as TLS
-import qualified OpenAI.Client as OpenAI
+import qualified OpenAI
 import qualified Options.Generic
+import qualified Servant.Client as Client
 
 example :: Text
 example = [__i|
@@ -56,9 +62,16 @@ Once I ran `eval "$(fnm env --use-on-cd)"` in my shell, it worked again. So I ju
 
 data Options = Options
     { openAIAPIKey :: Text
-    , slackBearerToken :: ByteString
     } deriving stock (Generic)
       deriving anyclass (ParseRecord)
+
+throws :: Exception e => IO (Either e a) -> IO a
+throws io = do
+    result <- io
+
+    case result of
+        Left  clientError -> Exception.throwIO clientError
+        Right x           -> return x
 
 main :: IO ()
 main = do
@@ -66,14 +79,35 @@ main = do
 
     manager <- TLS.newTlsManager
 
-    let client = OpenAI.makeOpenAIClient openAIAPIKey manager 3
+    baseUrl <- Client.parseBaseUrl "https://api.openai.com"
 
-    let engineId = EngineId "text-davinci-003"
+    let clientEnv = Client.mkClientEnv manager baseUrl
 
-    let textCompletionCreate =
-            OpenAI.defaultTextCompletionCreate
-                "Write a tagline for an ice cream shop."
+    let (_embeddings :<|> completions) = OpenAI.getClient header
+          where
+            header = "Bearer " <> openAIAPIKey
 
-    do  result <- OpenAI.completeText client engineId textCompletionCreate
+    let clientM = do
+            let completionRequest = CompletionRequest{..}
+                  where
+                   message = Message{..}
+                     where
+                       role = "user"
 
-        print result
+                       content = example
+
+                   messages = [ message ]
+
+                   max_tokens = Just 1024
+
+                   model = "gpt-4"
+
+            completionResponse <- completions completionRequest
+
+            liftIO (print completionResponse)
+
+    result <- Client.runClientM clientM clientEnv
+
+    case result of
+        Left  clientError -> Exception.throwIO clientError
+        Right x           -> return x
