@@ -4,6 +4,7 @@
 {-# LANGUAGE DeriveGeneric      #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE NamedFieldPuns     #-}
+{-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE OverloadedLists    #-}
 {-# LANGUAGE OverloadedStrings  #-}
 {-# LANGUAGE QuasiQuotes        #-}
@@ -41,6 +42,7 @@ import qualified Data.KdTree.Static as KdTree
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text.IO
 import qualified Data.Vector as Vector
+import qualified Network.HTTP.Client as HTTP
 import qualified Network.HTTP.Client.TLS as TLS
 import qualified OpenAI
 import qualified Options.Applicative as Options
@@ -158,7 +160,11 @@ main :: IO ()
 main = do
     Options{..} <- Options.customExecParser parserPrefs parseOptionsInfo
 
-    manager <- TLS.newTlsManager
+    let managerSettings = TLS.tlsManagerSettings
+            { HTTP.managerResponseTimeout = HTTP.responseTimeoutMicro 55_000_000
+            }
+
+    manager <- TLS.newTlsManagerWith managerSettings
 
     baseUrl <- Client.parseBaseUrl "https://api.openai.com"
 
@@ -182,7 +188,9 @@ main = do
 
     let clientM = case mode of
             Index{..} -> do
-                input <- liftIO (Vector.mapM Text.IO.readFile paths)
+                rawInputs <- liftIO (Vector.mapM Text.IO.readFile paths)
+
+                let input = Vector.concatMap (Vector.fromList . Text.chunksOf 10000) rawInputs
 
                 let embeddingRequest = EmbeddingRequest{..}
                       where
@@ -220,29 +228,29 @@ main = do
                         content = query
                         embedding = OpenAI.embedding (Vector.head data_)
 
-                let neighbors = KdTree.kNearest kdTree 3 indexedContent
+                let neighbors = KdTree.kNearest kdTree 15 indexedContent
+
+                let entries =
+                        fmap Main.content (Vector.fromList neighbors)
 
                 let completionRequest = CompletionRequest{..}
                       where
-                       message = Message{..}
-                         where
-                           role = "user"
+                        message = Message{..}
+                          where
+                            role = "user"
 
-                           content = [__i|
-                               #{labeled "Context" entries}
+                        messages = [ message ]
 
-                               Query:
-                               #{query}
-                           |]
-                             where
-                               entries =
-                                   fmap Main.content (Vector.fromList neighbors)
+                        max_tokens = Just 1024
 
-                       messages = [ message ]
+                        model = "gpt-4-0125-preview"
 
-                       max_tokens = Just 1024
+                        content = [__i|
+                            #{labeled "Context" entries}
 
-                       model = "gpt-4"
+                            Query:
+                            #{query}
+                        |]
 
                 CompletionResponse{..} <- completions completionRequest
 
@@ -253,9 +261,7 @@ main = do
                     [ choice ] -> do
                         Text.IO.putStrLn (toContent choice)
                     _ -> do
-                        let entries = fmap toContent choices
-
-                        Text.IO.putStr (labeled "Choice" entries)
+                        Text.IO.putStr (labeled "Choice" (fmap toContent choices))
 
     result <- Client.runClientM clientM clientEnv
 
