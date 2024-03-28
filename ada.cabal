@@ -21,9 +21,11 @@ executable ada
     , aeson
     , http-client
     , http-client-tls
+    , kdt
     , servant
     , servant-client
     , optparse-applicative
+    , serialise
     , string-interpolate
     , text
     , vector

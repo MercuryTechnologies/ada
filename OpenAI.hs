@@ -34,7 +34,7 @@ aesonOptions = Aeson.defaultOptions
     }
 
 data EmbeddingRequest = EmbeddingRequest
-    { input :: Text
+    { input :: Vector Text
     , model :: Text
     } deriving stock (Generic, Show)
       deriving anyclass (ToJSON)
@@ -47,7 +47,8 @@ instance FromJSON EmbeddingResponse where
     parseJSON = Aeson.genericParseJSON aesonOptions
 
 data Embedding = Embedding
-    { embedding :: Vector Double
+    { index :: Natural
+    , embedding :: Vector Double
     } deriving stock (Generic, Show)
       deriving anyclass (FromJSON)
 

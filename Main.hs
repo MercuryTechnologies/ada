@@ -1,5 +1,9 @@
 {-# LANGUAGE ApplicativeDo      #-}
 {-# LANGUAGE BlockArguments     #-}
+{-# LANGUAGE DeriveAnyClass     #-}
+{-# LANGUAGE DeriveGeneric      #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE NamedFieldPuns     #-}
 {-# LANGUAGE OverloadedLists    #-}
 {-# LANGUAGE OverloadedStrings  #-}
 {-# LANGUAGE QuasiQuotes        #-}
@@ -9,13 +13,15 @@
 
 module Main where
 
+import Codec.Serialise (Serialise)
 import Control.Applicative (many)
 import Control.Exception (Exception)
 import Control.Monad.IO.Class (liftIO)
-import Data.Foldable (forM_)
+import Control.Monad (unless)
 import Data.String.Interpolate (__i)
 import Data.Text (Text)
 import Data.Vector (Vector)
+import GHC.Generics (Generic)
 import Options.Applicative (Parser, ParserInfo, ParserPrefs(..))
 import Servant.API ((:<|>)(..))
 
@@ -23,11 +29,15 @@ import OpenAI
     ( Choice(..)
     , CompletionRequest(..)
     , CompletionResponse(..)
+    , Embedding(..)
     , EmbeddingRequest(..)
+    , EmbeddingResponse(..)
     , Message(..)
     )
 
+import qualified Codec.Serialise as Serialise
 import qualified Control.Exception as Exception
+import qualified Data.KdTree.Static as KdTree
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text.IO
 import qualified Data.Vector as Vector
@@ -36,41 +46,9 @@ import qualified OpenAI
 import qualified Options.Applicative as Options
 import qualified Servant.Client as Client
 
-example :: Text
-example = [__i|
-Howdy howdy, I’m working through migrating from an Intel MBP to an ARM one here. One thing I just hit was where it tried to run `npm` after installing `fnm`:
-```
-Write `zsh` configuration? ([y]es, [n]o, yes to [a]ll) y
-• Writing new shell configuration
-  shell=zsh
-  path="/Users/rjmholt/.zprofile"
-• Backing up
-  path="/Users/rjmholt/.zprofile"
-  backup_path="/Users/rjmholt/.zprofile.orig"
-• `yarn` is already installed
-
-⚠ Step `node` failed (Install `puppeteer`):
-     0: Failed to list globally installed `npm` packages
-     1: Command failed: `/bin/zsh -c 'npm list --global --json'`
-     2: /bin/zsh failed: exit status: 127
-
-  Location:
-     src/node/util/list_global_packages.rs:15
-
-  Stderr:
-     zsh:1: command not found: npm
-
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ SPANTRACE
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-     0: bootstrap_mercury::runner::run_step with step=Node description=Install
-  `puppeteer`
-        at src/runner.rs:22
-```
-Once I ran `eval "$(fnm env --use-on-cd)"` in my shell, it worked again. So I just wanted to raise that in case it’s something that bootstrap-mercury should do in general rather than an issue idiosyncratic to my scenario
-|]
-
-data Mode = Index{ paths :: Vector FilePath } | Query
+data Mode
+    = Index{ store :: FilePath, paths :: Vector FilePath }
+    | Query{ store :: FilePath, query :: Text }
 
 parsePath :: Parser FilePath
 parsePath =
@@ -79,8 +57,18 @@ parsePath =
         <>  Options.action "file"
         )
 
+parseIndexPath :: Parser FilePath
+parseIndexPath =
+    Options.strOption
+        (   Options.long "store"
+        <>  Options.metavar "FILE"
+        <>  Options.action "file"
+        )
+
 parseIndex :: Parser Mode
 parseIndex = do
+    store <- parseIndexPath
+
     paths <- fmap Vector.fromList (many parsePath)
 
     return Index{..}
@@ -92,7 +80,12 @@ parseIndexInfo =
         (Options.progDesc "Generate the index for the AI assistant")
 
 parseQuery :: Parser Mode
-parseQuery = pure Query
+parseQuery = do
+    store <- parseIndexPath
+
+    query <- Options.strArgument (Options.metavar "QUERY")
+
+    pure Query{..}
 
 parseQueryInfo :: ParserInfo Mode
 parseQueryInfo =
@@ -141,6 +134,26 @@ parserPrefs = Options.defaultPrefs
     , prefHelpShowGlobal = True
     }
 
+data IndexedContent = IndexedContent
+    { content :: Text
+    , embedding :: Vector Double
+    } deriving stock (Generic)
+      deriving anyclass (Serialise)
+
+embeddingModel :: Text
+embeddingModel = "text-embedding-3-large"
+
+labeled :: Text -> Vector Text -> Text
+labeled label entries =
+    Text.intercalate "\n\n" (Vector.toList (Vector.imap renderEntry entries))
+  where
+    renderEntry :: Int -> Text -> Text
+    renderEntry index entry = [__i|
+        #{label} \##{index}:
+
+        #{entry}
+    |]
+
 main :: IO ()
 main = do
     Options{..} <- Options.customExecParser parserPrefs parseOptionsInfo
@@ -155,26 +168,75 @@ main = do
           where
             header = "Bearer " <> openAIAPIKey
 
+    let validateEmbeddingResponse data_ input = do
+            unless (Vector.length data_ == Vector.length input) do
+                fail [__i|
+                    Internal error: the OpenAPI API returned the wrong number of embeddings
+
+                    The OpenAPI API should return exactly as many embeddings as inputs that we
+                    provided, but returned a different number of embeddings:
+
+                    \# of inputs provided    : #{Vector.length input}
+                    \# of embeddings returned: #{Vector.length data_}
+                |]
+
     let clientM = case mode of
-            Index paths -> do
-                forM_ paths \path -> do
-                    input <- liftIO (Text.IO.readFile path)
+            Index{..} -> do
+                input <- liftIO (Vector.mapM Text.IO.readFile paths)
 
-                    let model = "text-embedding-3-large"
+                let embeddingRequest = EmbeddingRequest{..}
+                      where
+                        model = embeddingModel
 
-                    let embeddingRequest = EmbeddingRequest{..}
+                EmbeddingResponse{..} <- embeddings embeddingRequest
 
-                    embeddingResponse <- embeddings embeddingRequest
+                liftIO (validateEmbeddingResponse data_ input)
 
-                    liftIO (print embeddingResponse)
-            Query -> do
+                let indexedContents = Vector.zipWith combine input data_
+                      where
+                        combine content Embedding{ embedding } =
+                            IndexedContent{..}
+
+                liftIO (Serialise.writeFileSerialise store indexedContents)
+            Query{..} -> do
+                indexedContents <- liftIO (Serialise.readFileDeserialise store)
+
+                let kdTree =
+                        KdTree.build (Vector.toList . Main.embedding)
+                            (Vector.toList indexedContents)
+
+                let input = Vector.singleton query
+
+                let embeddingRequest = EmbeddingRequest{..}
+                      where
+                        model = embeddingModel
+
+                EmbeddingResponse{..} <- embeddings embeddingRequest
+
+                liftIO (validateEmbeddingResponse data_ input)
+
+                let indexedContent = IndexedContent{..}
+                      where
+                        content = query
+                        embedding = OpenAI.embedding (Vector.head data_)
+
+                let neighbors = KdTree.kNearest kdTree 3 indexedContent
+
                 let completionRequest = CompletionRequest{..}
                       where
                        message = Message{..}
                          where
                            role = "user"
 
-                           content = example
+                           content = [__i|
+                               #{labeled "Context" entries}
+
+                               Query:
+                               #{query}
+                           |]
+                             where
+                               entries =
+                                   fmap Main.content (Vector.fromList neighbors)
 
                        messages = [ message ]
 
@@ -187,23 +249,13 @@ main = do
                 let toContent :: Choice -> Text
                     toContent Choice{ message = Message{..} } = content
 
-                let toChunk :: Int -> Choice -> Text
-                    toChunk index choice = [__i|
-                        Choice \##{index}:
-
-                        #{toContent choice}
-                    |]
-
                 liftIO case choices of
                     [ choice ] -> do
                         Text.IO.putStrLn (toContent choice)
                     _ -> do
-                        let chunks = Vector.imap toChunk choices
+                        let entries = fmap toContent choices
 
-                        let text =
-                                Text.intercalate "\n\n" (Vector.toList chunks)
-
-                        Text.IO.putStr text
+                        Text.IO.putStr (labeled "Choice" entries)
 
     result <- Client.runClientM clientM clientEnv
 
