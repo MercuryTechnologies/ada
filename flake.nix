@@ -21,8 +21,6 @@
                 (old.overrides or (_: _: { }))
                 [ (self.haskell.lib.packageSourceOverrides {
                     ada = ./.;
-
-                    openapi-slack = ~/proj/openapi-slack;
                   })
                   (hself: hsuper: {
                     openai-servant =

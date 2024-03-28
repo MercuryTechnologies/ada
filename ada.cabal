@@ -21,7 +21,6 @@ executable ada
     , http-client
     , http-client-tls
     , openai-hs
-    , openapi-slack
     , optparse-generic
     , string-interpolate
     , text

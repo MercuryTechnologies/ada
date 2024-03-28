@@ -13,15 +13,11 @@ import Data.ByteString (ByteString)
 import Data.String.Interpolate (__i)
 import Data.Text (Text)
 import GHC.Generics (Generic)
-import Network.HTTP.Client (Request(..))
 import OpenAI.Client (EngineId(..))
-import OpenAPI.Slack (Configuration(..))
 import Options.Generic (ParseRecord(..))
 
-import qualified Network.HTTP.Client as Client
 import qualified Network.HTTP.Client.TLS as TLS
 import qualified OpenAI.Client as OpenAI
-import qualified OpenAPI.Slack as Slack
 import qualified Options.Generic
 
 example :: Text
@@ -73,18 +69,6 @@ main = do
     let client = OpenAI.makeOpenAIClient openAIAPIKey manager 3
 
     let engineId = EngineId "text-davinci-003"
-
-    let configuration = Slack.defaultConfiguration
-            { configSecurityScheme = \request -> request
-                { requestHeaders =
-                        requestHeaders request
-                    ++  [ ("Authorization", "Bearer " <> slackBearerToken) ]
-                }
-            }
-
-    do  result <- Slack.runWithConfiguration configuration Slack.authTest
-
-        print (Client.responseBody result)
 
     let textCompletionCreate =
             OpenAI.defaultTextCompletionCreate
