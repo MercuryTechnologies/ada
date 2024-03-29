@@ -15,7 +15,7 @@ source-repository head
 
 executable ada
   main-is: Main.hs
-  other-modules: OpenAI
+  other-modules: Slack, OpenAI
   build-depends:
       base >=4.7 && <5
     , aeson
@@ -30,4 +30,6 @@ executable ada
     , text
     , vector
     , vector-split
+    , wss-client
   default-language: Haskell2010
+  ghc-options: -Wall

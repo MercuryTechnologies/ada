@@ -9,23 +9,27 @@
 {-# LANGUAGE OverloadedStrings  #-}
 {-# LANGUAGE QuasiQuotes        #-}
 {-# LANGUAGE RecordWildCards    #-}
+{-# LANGUAGE TypeApplications   #-}
 
-{-# OPTIONS_GHC -Wall #-}
+{-# OPTIONS_GHC -Wall -fno-warn-orphans #-}
 
 module Main where
 
 import Codec.Serialise (Serialise)
 import Control.Applicative (liftA2, many)
 import Control.Exception (Exception)
+import Control.Monad (forever)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad (unless)
 import Data.String.Interpolate (__i)
 import Data.Text (Text)
 import Data.Vector (Vector)
+import Data.Proxy (Proxy(..))
 import GHC.Generics (Generic)
 import Options.Applicative (Parser, ParserInfo, ParserPrefs(..))
 import Servant.API ((:<|>)(..))
 import Servant.Client (ClientM)
+import Slack (AppsConnectionsOpenResponse(..))
 
 import OpenAI
     ( Choice(..)
@@ -46,9 +50,11 @@ import qualified Data.Vector as Vector
 import qualified Data.Vector.Split as Split
 import qualified Network.HTTP.Client as HTTP
 import qualified Network.HTTP.Client.TLS as TLS
+import qualified Network.WebSockets.Client as WebSockets
 import qualified OpenAI
 import qualified Options.Applicative as Options
 import qualified Servant.Client as Client
+import qualified Slack
 
 instance Semigroup a => Semigroup (ClientM a) where
     (<>) = liftA2 (<>)
@@ -105,6 +111,7 @@ parseQueryInfo =
 
 data Options = Options
     { openAIAPIKey :: Text
+    , slackAPIKey :: Text
     , mode :: Mode
     }
 
@@ -113,6 +120,12 @@ parseOptions = do
     openAIAPIKey <- Options.strOption
         (   Options.long "openai-key"
         <>  Options.help "OpenAI API key"
+        <>  Options.metavar "KEY"
+        )
+
+    slackAPIKey <- Options.strOption
+        (   Options.long "slack-key"
+        <>  Options.help "Slack API key"
         <>  Options.metavar "KEY"
         )
 
@@ -174,13 +187,41 @@ main = do
 
     manager <- TLS.newTlsManagerWith managerSettings
 
-    baseUrl <- Client.parseBaseUrl "https://api.openai.com"
-
-    let clientEnv = Client.mkClientEnv manager baseUrl
-
-    let (embeddings :<|> completions) = OpenAI.getClient header
+    let (embeddings :<|> completions) = Client.client (Proxy @OpenAI.API) header
           where
             header = "Bearer " <> openAIAPIKey
+
+    let appsConnectionsOpen = Client.client (Proxy @Slack.API) header
+          where
+            header = "Bearer " <> slackAPIKey
+
+    slackEnv <- do
+        baseUrl <- Client.parseBaseUrl "https://slack.com"
+
+        return (Client.mkClientEnv manager baseUrl)
+
+    openAIEnv <- do
+        baseUrl <- Client.parseBaseUrl "https://api.openai.com"
+
+        return (Client.mkClientEnv manager baseUrl)
+
+    let slackClient = do
+            AppsConnectionsOpenResponse{..} <- appsConnectionsOpen
+
+            liftIO do
+                unless ok do
+                    fail [__i|
+                        Failed to open a Slack Socket connection
+                    |]
+
+            return url
+
+    url <- throws (Client.runClientM slackClient slackEnv)
+
+    WebSockets.withConnection (Text.unpack url) \connection -> forever do
+        text <- WebSockets.receiveData connection
+
+        Text.IO.putStrLn text
 
     let validateEmbeddingResponse data_ input = do
             unless (Vector.length data_ == Vector.length input) do
@@ -194,7 +235,7 @@ main = do
                     \# of embeddings returned: #{Vector.length data_}
                 |]
 
-    let clientM = case mode of
+    let openAIClient = case mode of
             Index{..} -> do
                 inputs <- liftIO (Vector.mapM Text.IO.readFile paths)
 
@@ -278,8 +319,4 @@ main = do
                     _ -> do
                         Text.IO.putStr (labeled "Choice" (fmap toContent choices))
 
-    result <- Client.runClientM clientM clientEnv
-
-    case result of
-        Left  clientError -> Exception.throwIO clientError
-        Right x           -> return x
+    throws (Client.runClientM openAIClient openAIEnv)

@@ -23,10 +23,7 @@
                     ada = ./.;
                   })
                   (hself: hsuper: {
-                    openai-servant =
-                      self.haskell.lib.unmarkBroken hsuper.openai-servant;
-
-                    openai-hs = self.haskell.lib.dontCheck hsuper.openai-hs;
+                    skews = self.haskell.lib.dontCheck hsuper.skews;
                   })
                 ];
           });

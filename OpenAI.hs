@@ -3,25 +3,20 @@
 {-# LANGUAGE DeriveAnyClass        #-}
 {-# LANGUAGE DeriveGeneric         #-}
 {-# LANGUAGE DerivingStrategies    #-}
-{-# LANGUAGE NamedFieldPuns        #-}
-{-# LANGUAGE TypeApplications      #-}
 {-# LANGUAGE TypeOperators         #-}
 
 module OpenAI where
 
 import Data.Aeson (FromJSON(..), ToJSON, Options(..))
-import Data.Proxy (Proxy(..))
 import Data.Text (Text)
 import Data.Vector (Vector)
 import GHC.Generics (Generic)
 import Numeric.Natural (Natural)
-import Servant.Client (Client, ClientM)
 
 import Servant.API
     (Header', JSON, Post, ReqBody, Required, Strict, (:>), (:<|>))
 
 import qualified Data.Aeson as Aeson
-import qualified Servant.Client as Client
 
 dropTrailingUnderscore :: String -> String
 dropTrailingUnderscore "_" = ""
@@ -92,6 +87,3 @@ type API =
     :>  (     Embeddings
         :<|>  Completions
         )
-
-getClient :: Client ClientM API
-getClient = Client.client (Proxy @API)
