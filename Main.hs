@@ -27,9 +27,19 @@ import Data.Vector (Vector)
 import Data.Proxy (Proxy(..))
 import GHC.Generics (Generic)
 import Options.Applicative (Parser, ParserInfo, ParserPrefs(..))
+import Prelude hiding (error)
 import Servant.API ((:<|>)(..))
 import Servant.Client (ClientM)
-import Slack (AppsConnectionsOpenResponse(..))
+
+import Slack
+    ( Acknowledgment(..)
+    , AppsConnectionsOpenResponse(..)
+    , ChatPostMessageRequest(..)
+    , ChatPostMessageResponse(..)
+    , Event(..)
+    , Payload(..)
+    , PayloadEvent(..)
+    )
 
 import OpenAI
     ( Choice(..)
@@ -43,6 +53,7 @@ import OpenAI
 
 import qualified Codec.Serialise as Serialise
 import qualified Control.Exception as Exception
+import qualified Data.Aeson as Aeson
 import qualified Data.KdTree.Static as KdTree
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text.IO
@@ -112,6 +123,7 @@ parseQueryInfo =
 data Options = Options
     { openAIAPIKey :: Text
     , slackAPIKey :: Text
+    , slackSocketKey :: Text
     , mode :: Mode
     }
 
@@ -124,8 +136,14 @@ parseOptions = do
         )
 
     slackAPIKey <- Options.strOption
-        (   Options.long "slack-key"
+        (   Options.long "slack-api-key"
         <>  Options.help "Slack API key"
+        <>  Options.metavar "KEY"
+        )
+
+    slackSocketKey <- Options.strOption
+        (   Options.long "slack-socket-key"
+        <>  Options.help "Slack socket key"
         <>  Options.metavar "KEY"
         )
 
@@ -191,7 +209,11 @@ main = do
           where
             header = "Bearer " <> openAIAPIKey
 
-    let appsConnectionsOpen = Client.client (Proxy @Slack.API) header
+    let (appsConnectionsOpen :<|> _) = Client.client (Proxy @Slack.API) header
+          where
+            header = "Bearer " <> slackSocketKey
+
+    let (_ :<|> chatPostMessage) = Client.client (Proxy @Slack.API) header
           where
             header = "Bearer " <> slackAPIKey
 
@@ -218,10 +240,54 @@ main = do
 
     url <- throws (Client.runClientM slackClient slackEnv)
 
-    WebSockets.withConnection (Text.unpack url) \connection -> forever do
-        text <- WebSockets.receiveData connection
+    WebSockets.withConnection (Text.unpack url) \connection -> do
+        flip Client.runClientM slackEnv do
+            forever do
+                bytes <- liftIO (WebSockets.receiveData connection)
 
-        Text.IO.putStrLn text
+                liftIO (print bytes)
+
+                event <- case Aeson.eitherDecode bytes of
+                    Left e -> liftIO do
+                        fail [__i|
+                            Internal error: Invalid JSON
+
+                            The Slack websocket sent a JSON message that failed to parse:
+
+                            Message: #{bytes}
+                            Error  : #{e}
+                        |]
+
+                    Right event -> do
+                        return event
+
+                let acknowledge envelope_id =
+                        liftIO (WebSockets.sendTextData connection (Aeson.encode Acknowledgment{..}))
+
+                case event of
+                    Hello{ } -> do
+                        return Nothing
+
+                    EventsAPI{..} -> do
+                        acknowledge envelope_id
+
+                        let Payload{ event = event_ } = payload
+                        let PayloadEvent{..} = event_
+                        let text = "hi!"
+                        let chatPostMessageRequest =
+                                ChatPostMessageRequest{ ts = Just ts, .. }
+
+                        ChatPostMessageResponse{..} <- chatPostMessage chatPostMessageRequest
+
+                        unless ok do
+                            liftIO do
+                                fail [__i|
+                                    Failed to post a chat message
+
+                                    #{error}
+                                |]
+
+                        return (Just envelope_id)
 
     let validateEmbeddingResponse data_ input = do
             unless (Vector.length data_ == Vector.length input) do
