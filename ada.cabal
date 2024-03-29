@@ -29,4 +29,5 @@ executable ada
     , string-interpolate
     , text
     , vector
+    , vector-split
   default-language: Haskell2010

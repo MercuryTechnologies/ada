@@ -15,7 +15,7 @@
 module Main where
 
 import Codec.Serialise (Serialise)
-import Control.Applicative (many)
+import Control.Applicative (liftA2, many)
 import Control.Exception (Exception)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad (unless)
@@ -25,6 +25,7 @@ import Data.Vector (Vector)
 import GHC.Generics (Generic)
 import Options.Applicative (Parser, ParserInfo, ParserPrefs(..))
 import Servant.API ((:<|>)(..))
+import Servant.Client (ClientM)
 
 import OpenAI
     ( Choice(..)
@@ -42,11 +43,18 @@ import qualified Data.KdTree.Static as KdTree
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text.IO
 import qualified Data.Vector as Vector
+import qualified Data.Vector.Split as Split
 import qualified Network.HTTP.Client as HTTP
 import qualified Network.HTTP.Client.TLS as TLS
 import qualified OpenAI
 import qualified Options.Applicative as Options
 import qualified Servant.Client as Client
+
+instance Semigroup a => Semigroup (ClientM a) where
+    (<>) = liftA2 (<>)
+
+instance Monoid a => Monoid (ClientM a) where
+    mempty = pure mempty
 
 data Mode
     = Index{ store :: FilePath, paths :: Vector FilePath }
@@ -188,19 +196,25 @@ main = do
 
     let clientM = case mode of
             Index{..} -> do
-                rawInputs <- liftIO (Vector.mapM Text.IO.readFile paths)
+                inputs <- liftIO (Vector.mapM Text.IO.readFile paths)
 
-                let input = Vector.concatMap (Vector.fromList . Text.chunksOf 10000) rawInputs
+                let chunkedInputs =
+                        Vector.concatMap (Vector.fromList . Text.chunksOf 10000) inputs
 
-                let embeddingRequest = EmbeddingRequest{..}
-                      where
-                        model = embeddingModel
+                let index input = do
+                        let embeddingRequest = EmbeddingRequest{..}
+                              where
+                                model = embeddingModel
 
-                EmbeddingResponse{..} <- embeddings embeddingRequest
+                        EmbeddingResponse{..} <- embeddings embeddingRequest
 
-                liftIO (validateEmbeddingResponse data_ input)
+                        liftIO (validateEmbeddingResponse data_ input)
 
-                let indexedContents = Vector.zipWith combine input data_
+                        return data_
+
+                data_ <- foldMap index (Split.chunksOf 1097 chunkedInputs)
+
+                let indexedContents = Vector.zipWith combine chunkedInputs data_
                       where
                         combine content Embedding{ embedding } =
                             IndexedContent{..}
@@ -249,6 +263,7 @@ main = do
                             #{labeled "Context" entries}
 
                             Query:
+
                             #{query}
                         |]
 
