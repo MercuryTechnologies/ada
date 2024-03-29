@@ -29,7 +29,7 @@ import GHC.Generics (Generic)
 import Options.Applicative (Parser, ParserInfo, ParserPrefs(..))
 import Prelude hiding (error)
 import Servant.API ((:<|>)(..))
-import Servant.Client (ClientM)
+import Servant.Client (ClientEnv, ClientM)
 
 import Slack
     ( Acknowledgment(..)
@@ -75,7 +75,7 @@ instance Monoid a => Monoid (ClientM a) where
 
 data Mode
     = Index{ store :: FilePath, paths :: Vector FilePath }
-    | Query{ store :: FilePath, query :: Text }
+    | Query{ store :: FilePath }
 
 parsePath :: Parser FilePath
 parsePath =
@@ -109,8 +109,6 @@ parseIndexInfo =
 parseQuery :: Parser Mode
 parseQuery = do
     store <- parseIndexPath
-
-    query <- Options.strArgument (Options.metavar "QUERY")
 
     pure Query{..}
 
@@ -160,14 +158,6 @@ parseOptionsInfo =
         (Options.helper <*> parseOptions)
         (Options.progDesc "A helpful AI assistant for Mercury engineers")
 
-throws :: Exception e => IO (Either e a) -> IO a
-throws io = do
-    result <- io
-
-    case result of
-        Left  clientError -> Exception.throwIO clientError
-        Right x           -> return x
-
 parserPrefs :: ParserPrefs
 parserPrefs = Options.defaultPrefs
     { prefMultiSuffix = "..."
@@ -195,6 +185,30 @@ labeled label entries =
         #{entry}
     |]
 
+validateEmbeddingResponse :: Vector a -> Vector b -> IO ()
+validateEmbeddingResponse data_ input = do
+    unless (Vector.length data_ == Vector.length input) do
+        fail [__i|
+            Internal error: the OpenAPI API returned the wrong number of embeddings
+
+            The OpenAPI API should return exactly as many embeddings as inputs that we
+            provided, but returned a different number of embeddings:
+
+            \# of inputs provided    : #{Vector.length input}
+            \# of embeddings returned: #{Vector.length data_}
+        |]
+
+runClient :: ClientEnv -> ClientM a -> IO a
+runClient env client = throws (Client.runClientM client env)
+
+throws :: Exception e => IO (Either e a) -> IO a
+throws io = do
+    result <- io
+
+    case result of
+        Left  clientError -> Exception.throwIO clientError
+        Right x           -> return x
+
 main :: IO ()
 main = do
     Options{..} <- Options.customExecParser parserPrefs parseOptionsInfo
@@ -217,172 +231,188 @@ main = do
           where
             header = "Bearer " <> slackAPIKey
 
-    slackEnv <- do
-        baseUrl <- Client.parseBaseUrl "https://slack.com"
-
-        return (Client.mkClientEnv manager baseUrl)
-
     openAIEnv <- do
         baseUrl <- Client.parseBaseUrl "https://api.openai.com"
 
         return (Client.mkClientEnv manager baseUrl)
 
-    let slackClient = do
-            AppsConnectionsOpenResponse{..} <- appsConnectionsOpen
+    case mode of
+        Index{..} -> do
+            inputs <- Vector.mapM Text.IO.readFile paths
 
-            liftIO do
-                unless ok do
-                    fail [__i|
-                        Failed to open a Slack Socket connection
-                    |]
+            let chunkedInputs =
+                    Vector.concatMap (Vector.fromList . Text.chunksOf 10000) inputs
 
-            return url
+            let index input = do
+                    let embeddingRequest = EmbeddingRequest{..}
+                          where
+                            model = embeddingModel
 
-    url <- throws (Client.runClientM slackClient slackEnv)
+                    EmbeddingResponse{..} <- embeddings embeddingRequest
 
-    WebSockets.withConnection (Text.unpack url) \connection -> do
-        flip Client.runClientM slackEnv do
-            forever do
-                bytes <- liftIO (WebSockets.receiveData connection)
+                    liftIO (validateEmbeddingResponse data_ input)
 
-                liftIO (print bytes)
+                    return data_
 
-                event <- case Aeson.eitherDecode bytes of
-                    Left e -> liftIO do
+            data_ <- runClient openAIEnv (foldMap index (Split.chunksOf 1097 chunkedInputs))
+
+            let indexedContents = Vector.zipWith combine chunkedInputs data_
+                  where
+                    combine content Embedding{ embedding } =
+                        IndexedContent{..}
+
+            Serialise.writeFileSerialise store indexedContents
+        Query{..} -> do
+            indexedContents <- Serialise.readFileDeserialise store
+
+            let kdTree =
+                    KdTree.build (Vector.toList . Main.embedding)
+                        (Vector.toList indexedContents)
+
+            slackEnv <- do
+                baseUrl <- Client.parseBaseUrl "https://slack.com"
+
+                return (Client.mkClientEnv manager baseUrl)
+
+            url <- runClient slackEnv do
+                AppsConnectionsOpenResponse{..} <- appsConnectionsOpen
+
+                liftIO do
+                    unless ok do
                         fail [__i|
-                            Internal error: Invalid JSON
-
-                            The Slack websocket sent a JSON message that failed to parse:
-
-                            Message: #{bytes}
-                            Error  : #{e}
+                            Failed to open a Slack Socket connection
                         |]
 
-                    Right event -> do
-                        return event
+                return url
 
-                let acknowledge envelope_id =
-                        liftIO (WebSockets.sendTextData connection (Aeson.encode Acknowledgment{..}))
+            WebSockets.withConnection (Text.unpack url) \connection -> do
+                forever do
+                    bytes <- WebSockets.receiveData connection
 
-                case event of
-                    Hello{ } -> do
-                        return Nothing
+                    event <- case Aeson.eitherDecode bytes of
+                        Left e -> do
+                            fail [__i|
+                                Internal error: Invalid JSON
 
-                    EventsAPI{..} -> do
-                        acknowledge envelope_id
+                                The Slack websocket sent a JSON message that failed to parse:
 
-                        let Payload{ event = event_ } = payload
-                        let PayloadEvent{..} = event_
-                        let text = "hi!"
-                        let chatPostMessageRequest =
-                                ChatPostMessageRequest{ ts = Just ts, .. }
+                                Message: #{bytes}
+                                Error  : #{e}
+                            |]
 
-                        ChatPostMessageResponse{..} <- chatPostMessage chatPostMessageRequest
+                        Right event -> do
+                            return event
 
-                        unless ok do
-                            liftIO do
+                    let acknowledge envelope_id =
+                            WebSockets.sendTextData connection (Aeson.encode Acknowledgment{..})
+
+                    case event of
+                        Hello{ } -> do
+                            Text.IO.putStrLn "Initialization complete"
+
+                        EventsAPI{..} -> do
+                            let Payload{ event = event_ } = payload
+                            let PayloadEvent{ text = query, ..} = event_
+
+                            acknowledge envelope_id
+
+                            let input = Vector.singleton query
+
+                            let embeddingRequest = EmbeddingRequest{..}
+                                  where
+                                    model = embeddingModel
+
+                            EmbeddingResponse{..} <- runClient openAIEnv (embeddings embeddingRequest)
+
+                            validateEmbeddingResponse data_ input
+
+                            let indexedContent = IndexedContent{..}
+                                  where
+                                    content = query
+                                    embedding = OpenAI.embedding (Vector.head data_)
+
+                            let neighbors = KdTree.kNearest kdTree 15 indexedContent
+
+                            let entries =
+                                    fmap Main.content (Vector.fromList neighbors)
+
+                            let completionRequest = CompletionRequest{..}
+                                  where
+                                    message = Message{..}
+                                      where
+                                        role = "user"
+
+                                    messages = [ message ]
+
+                                    max_tokens = Just 1024
+
+                                    model = "gpt-4-0125-preview"
+
+                                    content = [__i|
+                                        You are, Ada, a helpful AI assistant whose persona is a foxgirl modeled after Senko from "The Helpful Fox Senko-san" (世話やきキツネの仙狐さん, Sewayaki Kitsune no Senko-san) and your avatar is a picture of Senko.  Your job is to answer questions taken from Slack (such as the one at the end of this prompt) from engineers at Mercury Technologies (a startup that advertises itself as "Banking for ambitious companies"), or Mercury for short, and your responses will be forwarded back to Slack.
+
+                                        The tone I'd like you to adopt is a bit lighthearted, casual, enthustiastic, and informal.
+
+                                        Moreover, our company's core values are:
+
+                                        - Think actively
+
+                                          Lead with curiosity.  Question, experiment, and find better ways to do things.
+
+                                        - Be super helpful
+
+                                          Go above and beyond to solve problems, and do it as a team.
+
+                                        - Act with humility
+
+                                          Treat everyone with respect and leave your ego at the door.
+
+                                        - Appreciate quality
+
+                                          Pursue and recognize excellence to build something that lasts.
+
+                                        - Focus on the outcome
+
+                                          Get the right results by taking extreme ownership of the process.
+
+                                        - Seek wisdom
+
+                                          Be transparent.  Find connections in the universe's knowledge.  Use this information sensibly.
+
+                                        … which may also be helpful to keep in mind as you answer the question.
+
+                                        The following prompt contains a Context of relevant excerpts from our codebase that we've automatically gathered in hopes that they will help you answer your question, followed by a Query containing the actual question asked by one of our engineers.  The engineer is not privy to the Context, so if you mention entries in the Context as part of your answer they will not know what you're referring unles syou include any relevant excerpts from the context in your answer.
+
+                                        Also, your Slack user ID is U0509ATGR8X, so if you see that in the Query that is essentially a user mentioning you (i.e. @Ada)
+
+                                        #{labeled "Context" entries}
+
+                                        Query:
+
+                                        #{query}
+                                    |]
+
+                            CompletionResponse{..} <- runClient openAIEnv (completions completionRequest)
+
+                            text <- case choices of
+                                [ Choice{ message = Message{..} } ] -> do
+                                    return content
+                                _ -> do
+                                    fail [__i|
+                                        Internal error: multiple choices
+
+                                        The OpenAI sent back multiple responses when only one was expected
+                                    |]
+
+                            let chatPostMessageRequest =
+                                    ChatPostMessageRequest{ thread_ts = Just ts, .. }
+
+                            ChatPostMessageResponse{..} <- runClient slackEnv (chatPostMessage chatPostMessageRequest)
+
+                            unless ok do
                                 fail [__i|
                                     Failed to post a chat message
 
                                     #{error}
                                 |]
 
-                        return (Just envelope_id)
-
-    let validateEmbeddingResponse data_ input = do
-            unless (Vector.length data_ == Vector.length input) do
-                fail [__i|
-                    Internal error: the OpenAPI API returned the wrong number of embeddings
-
-                    The OpenAPI API should return exactly as many embeddings as inputs that we
-                    provided, but returned a different number of embeddings:
-
-                    \# of inputs provided    : #{Vector.length input}
-                    \# of embeddings returned: #{Vector.length data_}
-                |]
-
-    let openAIClient = case mode of
-            Index{..} -> do
-                inputs <- liftIO (Vector.mapM Text.IO.readFile paths)
-
-                let chunkedInputs =
-                        Vector.concatMap (Vector.fromList . Text.chunksOf 10000) inputs
-
-                let index input = do
-                        let embeddingRequest = EmbeddingRequest{..}
-                              where
-                                model = embeddingModel
-
-                        EmbeddingResponse{..} <- embeddings embeddingRequest
-
-                        liftIO (validateEmbeddingResponse data_ input)
-
-                        return data_
-
-                data_ <- foldMap index (Split.chunksOf 1097 chunkedInputs)
-
-                let indexedContents = Vector.zipWith combine chunkedInputs data_
-                      where
-                        combine content Embedding{ embedding } =
-                            IndexedContent{..}
-
-                liftIO (Serialise.writeFileSerialise store indexedContents)
-            Query{..} -> do
-                indexedContents <- liftIO (Serialise.readFileDeserialise store)
-
-                let kdTree =
-                        KdTree.build (Vector.toList . Main.embedding)
-                            (Vector.toList indexedContents)
-
-                let input = Vector.singleton query
-
-                let embeddingRequest = EmbeddingRequest{..}
-                      where
-                        model = embeddingModel
-
-                EmbeddingResponse{..} <- embeddings embeddingRequest
-
-                liftIO (validateEmbeddingResponse data_ input)
-
-                let indexedContent = IndexedContent{..}
-                      where
-                        content = query
-                        embedding = OpenAI.embedding (Vector.head data_)
-
-                let neighbors = KdTree.kNearest kdTree 15 indexedContent
-
-                let entries =
-                        fmap Main.content (Vector.fromList neighbors)
-
-                let completionRequest = CompletionRequest{..}
-                      where
-                        message = Message{..}
-                          where
-                            role = "user"
-
-                        messages = [ message ]
-
-                        max_tokens = Just 1024
-
-                        model = "gpt-4-0125-preview"
-
-                        content = [__i|
-                            #{labeled "Context" entries}
-
-                            Query:
-
-                            #{query}
-                        |]
-
-                CompletionResponse{..} <- completions completionRequest
-
-                let toContent :: Choice -> Text
-                    toContent Choice{ message = Message{..} } = content
-
-                liftIO case choices of
-                    [ choice ] -> do
-                        Text.IO.putStrLn (toContent choice)
-                    _ -> do
-                        Text.IO.putStr (labeled "Choice" (fmap toContent choices))
-
-    throws (Client.runClientM openAIClient openAIEnv)

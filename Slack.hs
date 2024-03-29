@@ -36,7 +36,7 @@ type AppsConnectionsOpen =
 
 data ChatPostMessageRequest = ChatPostMessageRequest
     { channel :: Text
-    , ts :: Maybe Text
+    , thread_ts :: Maybe Text
     , text :: Text
     } deriving stock (Generic, Show)
       deriving anyclass (ToJSON)
@@ -82,6 +82,7 @@ data Payload = Payload
 data PayloadEvent = PayloadEvent
     { ts :: Text
     , channel :: Text
+    , text :: Text
     } deriving stock (Generic, Show)
       deriving anyclass (FromJSON)
 
