@@ -63,6 +63,7 @@ data Event
         { envelope_id :: Text
         , payload :: Payload
         }
+    | Disconnect
     deriving stock (Generic, Show)
 
 instance FromJSON Event where

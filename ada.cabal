@@ -22,6 +22,7 @@ executable ada
     , http-client
     , http-client-tls
     , kdt
+    , safe-exceptions
     , servant
     , servant-client
     , optparse-applicative

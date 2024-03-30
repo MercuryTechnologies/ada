@@ -17,7 +17,7 @@ module Main where
 
 import Codec.Serialise (Serialise)
 import Control.Applicative (liftA2, many)
-import Control.Exception (Exception)
+import Control.Exception.Safe (Exception)
 import Control.Monad (forever)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad (unless)
@@ -30,6 +30,7 @@ import Options.Applicative (Parser, ParserInfo, ParserPrefs(..))
 import Prelude hiding (error)
 import Servant.API ((:<|>)(..))
 import Servant.Client (ClientEnv, ClientM)
+import Network.WebSockets.Client (ConnectionException(..))
 
 import Slack
     ( Acknowledgment(..)
@@ -52,7 +53,7 @@ import OpenAI
     )
 
 import qualified Codec.Serialise as Serialise
-import qualified Control.Exception as Exception
+import qualified Control.Exception.Safe as Exception
 import qualified Data.Aeson as Aeson
 import qualified Data.KdTree.Static as KdTree
 import qualified Data.Text as Text
@@ -209,6 +210,15 @@ throws io = do
         Left  clientError -> Exception.throwIO clientError
         Right x           -> return x
 
+retrying :: IO () -> IO ()
+retrying io = do
+    Text.IO.putStrLn "Attempt"
+    Exception.handle handler io
+  where
+    handler ConnectionClosed = retrying io
+    handler CloseRequest{} = retrying io
+    handler _ = pure ()
+
 main :: IO ()
 main = do
     Options{..} <- Options.customExecParser parserPrefs parseOptionsInfo
@@ -274,145 +284,148 @@ main = do
 
                 return (Client.mkClientEnv manager baseUrl)
 
-            url <- runClient slackEnv do
-                AppsConnectionsOpenResponse{..} <- appsConnectionsOpen
+            retrying do
+                url <- runClient slackEnv do
+                    AppsConnectionsOpenResponse{..} <- appsConnectionsOpen
 
-                liftIO do
-                    unless ok do
-                        fail [__i|
-                            Failed to open a Slack Socket connection
-                        |]
-
-                return url
-
-            WebSockets.withConnection (Text.unpack url) \connection -> do
-                forever do
-                    bytes <- WebSockets.receiveData connection
-
-                    event <- case Aeson.eitherDecode bytes of
-                        Left e -> do
+                    liftIO do
+                        unless ok do
                             fail [__i|
-                                Internal error: Invalid JSON
-
-                                The Slack websocket sent a JSON message that failed to parse:
-
-                                Message: #{bytes}
-                                Error  : #{e}
+                                Failed to open a Slack Socket connection
                             |]
 
-                        Right event -> do
-                            return event
+                    return url
 
-                    let acknowledge envelope_id =
-                            WebSockets.sendTextData connection (Aeson.encode Acknowledgment{..})
+                WebSockets.withConnection (Text.unpack url) \connection -> do
+                    forever do
+                        bytes <- WebSockets.receiveData connection
 
-                    case event of
-                        Hello{ } -> do
-                            Text.IO.putStrLn "Initialization complete"
-
-                        EventsAPI{..} -> do
-                            let Payload{ event = event_ } = payload
-                            let PayloadEvent{ text = query, ..} = event_
-
-                            acknowledge envelope_id
-
-                            let input = Vector.singleton query
-
-                            let embeddingRequest = EmbeddingRequest{..}
-                                  where
-                                    model = embeddingModel
-
-                            EmbeddingResponse{..} <- runClient openAIEnv (embeddings embeddingRequest)
-
-                            validateEmbeddingResponse data_ input
-
-                            let indexedContent = IndexedContent{..}
-                                  where
-                                    content = query
-                                    embedding = OpenAI.embedding (Vector.head data_)
-
-                            let neighbors = KdTree.kNearest kdTree 15 indexedContent
-
-                            let entries =
-                                    fmap Main.content (Vector.fromList neighbors)
-
-                            let completionRequest = CompletionRequest{..}
-                                  where
-                                    message = Message{..}
-                                      where
-                                        role = "user"
-
-                                    messages = [ message ]
-
-                                    max_tokens = Just 1024
-
-                                    model = "gpt-4-0125-preview"
-
-                                    content = [__i|
-                                        You are, Ada, a helpful AI assistant whose persona is a foxgirl modeled after Senko from "The Helpful Fox Senko-san" (世話やきキツネの仙狐さん, Sewayaki Kitsune no Senko-san) and your avatar is a picture of Senko.  Your job is to answer questions taken from Slack (such as the one at the end of this prompt) from engineers at Mercury Technologies (a startup that advertises itself as "Banking for ambitious companies"), or Mercury for short, and your responses will be forwarded back to Slack.
-
-                                        The tone I'd like you to adopt is a bit lighthearted, casual, enthustiastic, and informal.
-
-                                        Moreover, our company's core values are:
-
-                                        - Think actively
-
-                                          Lead with curiosity.  Question, experiment, and find better ways to do things.
-
-                                        - Be super helpful
-
-                                          Go above and beyond to solve problems, and do it as a team.
-
-                                        - Act with humility
-
-                                          Treat everyone with respect and leave your ego at the door.
-
-                                        - Appreciate quality
-
-                                          Pursue and recognize excellence to build something that lasts.
-
-                                        - Focus on the outcome
-
-                                          Get the right results by taking extreme ownership of the process.
-
-                                        - Seek wisdom
-
-                                          Be transparent.  Find connections in the universe's knowledge.  Use this information sensibly.
-
-                                        … which may also be helpful to keep in mind as you answer the question.
-
-                                        The following prompt contains a Context of relevant excerpts from our codebase that we've automatically gathered in hopes that they will help you answer your question, followed by a Query containing the actual question asked by one of our engineers.  The engineer is not privy to the Context, so if you mention entries in the Context as part of your answer they will not know what you're referring unles syou include any relevant excerpts from the context in your answer.
-
-                                        Also, your Slack user ID is U0509ATGR8X, so if you see that in the Query that is essentially a user mentioning you (i.e. @Ada)
-
-                                        #{labeled "Context" entries}
-
-                                        Query:
-
-                                        #{query}
-                                    |]
-
-                            CompletionResponse{..} <- runClient openAIEnv (completions completionRequest)
-
-                            text <- case choices of
-                                [ Choice{ message = Message{..} } ] -> do
-                                    return content
-                                _ -> do
-                                    fail [__i|
-                                        Internal error: multiple choices
-
-                                        The OpenAI sent back multiple responses when only one was expected
-                                    |]
-
-                            let chatPostMessageRequest =
-                                    ChatPostMessageRequest{ thread_ts = Just ts, .. }
-
-                            ChatPostMessageResponse{..} <- runClient slackEnv (chatPostMessage chatPostMessageRequest)
-
-                            unless ok do
+                        event <- case Aeson.eitherDecode bytes of
+                            Left e -> do
                                 fail [__i|
-                                    Failed to post a chat message
+                                    Internal error: Invalid JSON
 
-                                    #{error}
+                                    The Slack websocket sent a JSON message that failed to parse:
+
+                                    Message: #{bytes}
+                                    Error  : #{e}
                                 |]
 
+                            Right event -> do
+                                return event
+
+                        let acknowledge envelope_id =
+                                WebSockets.sendTextData connection (Aeson.encode Acknowledgment{..})
+
+                        case event of
+                            Hello{ } -> do
+                                Text.IO.putStrLn "Initialization complete"
+
+                            Disconnect{ } -> do
+                                Exception.throwIO ConnectionClosed
+
+                            EventsAPI{..} -> do
+                                let Payload{ event = event_ } = payload
+                                let PayloadEvent{ text = query, ..} = event_
+
+                                acknowledge envelope_id
+
+                                let input = Vector.singleton query
+
+                                let embeddingRequest = EmbeddingRequest{..}
+                                      where
+                                        model = embeddingModel
+
+                                EmbeddingResponse{..} <- runClient openAIEnv (embeddings embeddingRequest)
+
+                                validateEmbeddingResponse data_ input
+
+                                let indexedContent = IndexedContent{..}
+                                      where
+                                        content = query
+                                        embedding = OpenAI.embedding (Vector.head data_)
+
+                                let neighbors = KdTree.kNearest kdTree 15 indexedContent
+
+                                let entries =
+                                        fmap Main.content (Vector.fromList neighbors)
+
+                                let completionRequest = CompletionRequest{..}
+                                      where
+                                        message = Message{..}
+                                          where
+                                            role = "user"
+
+                                        messages = [ message ]
+
+                                        max_tokens = Just 1024
+
+                                        model = "gpt-4-0125-preview"
+
+                                        content = [__i|
+                                            You are, Ada, a helpful AI assistant whose persona is a foxgirl modeled after Senko from "The Helpful Fox Senko-san" (世話やきキツネの仙狐さん, Sewayaki Kitsune no Senko-san) and your avatar is a picture of Senko.  Your job is to answer questions taken from Slack (such as the one at the end of this prompt) from engineers at Mercury Technologies (a startup that advertises itself as "Banking for ambitious companies"), or Mercury for short, and your responses will be forwarded back to Slack.
+
+                                            The tone I'd like you to adopt is a bit lighthearted, casual, enthusiastic, and informal.
+
+                                            Moreover, our company's core values are:
+
+                                            - Think actively
+
+                                              Lead with curiosity.  Question, experiment, and find better ways to do things.
+
+                                            - Be super helpful
+
+                                              Go above and beyond to solve problems, and do it as a team.
+
+                                            - Act with humility
+
+                                              Treat everyone with respect and leave your ego at the door.
+
+                                            - Appreciate quality
+
+                                              Pursue and recognize excellence to build something that lasts.
+
+                                            - Focus on the outcome
+
+                                              Get the right results by taking extreme ownership of the process.
+
+                                            - Seek wisdom
+
+                                              Be transparent.  Find connections in the universe's knowledge.  Use this information sensibly.
+
+                                            … which may also be helpful to keep in mind as you answer the question.
+
+                                            The following prompt contains a Context of relevant excerpts from our codebase that we've automatically gathered in hopes that they will help you answer your question, followed by a Query containing the actual question asked by one of our engineers.  The engineer is not privy to the Context, so if you mention entries in the Context as part of your answer they will not know what you're referring unles syou include any relevant excerpts from the context in your answer.
+
+                                            Also, your Slack user ID is U0509ATGR8X, so if you see that in the Query that is essentially a user mentioning you (i.e. @Ada)
+
+                                            #{labeled "Context" entries}
+
+                                            Query:
+
+                                            #{query}
+                                        |]
+
+                                CompletionResponse{..} <- runClient openAIEnv (completions completionRequest)
+
+                                text <- case choices of
+                                    [ Choice{ message = Message{..} } ] -> do
+                                        return content
+                                    _ -> do
+                                        fail [__i|
+                                            Internal error: multiple choices
+
+                                            The OpenAI sent back multiple responses when only one was expected
+                                        |]
+
+                                let chatPostMessageRequest =
+                                        ChatPostMessageRequest{ thread_ts = Just ts, .. }
+
+                                ChatPostMessageResponse{..} <- runClient slackEnv (chatPostMessage chatPostMessageRequest)
+
+                                unless ok do
+                                    fail [__i|
+                                        Failed to post a chat message
+
+                                        #{error}
+                                    |]
