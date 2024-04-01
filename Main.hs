@@ -77,7 +77,7 @@ instance Monoid a => Monoid (ClientM a) where
 
 data Mode
     = Index{ store :: FilePath, paths :: Vector FilePath }
-    | Query{ store :: FilePath }
+    | Query{ store :: FilePath , slackAPIKey :: Text, slackSocketKey :: Text }
 
 parsePath :: Parser FilePath
 parsePath =
@@ -112,6 +112,18 @@ parseQuery :: Parser Mode
 parseQuery = do
     store <- parseIndexPath
 
+    slackAPIKey <- Options.strOption
+        (   Options.long "slack-api-key"
+        <>  Options.help "Slack API key"
+        <>  Options.metavar "KEY"
+        )
+
+    slackSocketKey <- Options.strOption
+        (   Options.long "slack-socket-key"
+        <>  Options.help "Slack socket key"
+        <>  Options.metavar "KEY"
+        )
+
     pure Query{..}
 
 parseQueryInfo :: ParserInfo Mode
@@ -122,8 +134,6 @@ parseQueryInfo =
 
 data Options = Options
     { openAIAPIKey :: Text
-    , slackAPIKey :: Text
-    , slackSocketKey :: Text
     , mode :: Mode
     }
 
@@ -132,18 +142,6 @@ parseOptions = do
     openAIAPIKey <- Options.strOption
         (   Options.long "openai-key"
         <>  Options.help "OpenAI API key"
-        <>  Options.metavar "KEY"
-        )
-
-    slackAPIKey <- Options.strOption
-        (   Options.long "slack-api-key"
-        <>  Options.help "Slack API key"
-        <>  Options.metavar "KEY"
-        )
-
-    slackSocketKey <- Options.strOption
-        (   Options.long "slack-socket-key"
-        <>  Options.help "Slack socket key"
         <>  Options.metavar "KEY"
         )
 
@@ -228,22 +226,14 @@ main = do
 
     manager <- TLS.newTlsManagerWith managerSettings
 
-    let (embeddings :<|> completions) = Client.client (Proxy @OpenAI.API) header
-          where
-            header = "Bearer " <> openAIAPIKey
-
-    let (appsConnectionsOpen :<|> _) = Client.client (Proxy @Slack.API) header
-          where
-            header = "Bearer " <> slackSocketKey
-
-    let (_ :<|> chatPostMessage) = Client.client (Proxy @Slack.API) header
-          where
-            header = "Bearer " <> slackAPIKey
-
     openAIEnv <- do
         baseUrl <- Client.parseBaseUrl "https://api.openai.com"
 
         return (Client.mkClientEnv manager baseUrl)
+
+    let (embeddings :<|> completions) = Client.client (Proxy @OpenAI.API) header
+          where
+            header = "Bearer " <> openAIAPIKey
 
     case mode of
         Index{..} -> do
@@ -282,6 +272,14 @@ main = do
                 baseUrl <- Client.parseBaseUrl "https://slack.com"
 
                 return (Client.mkClientEnv manager baseUrl)
+
+            let (appsConnectionsOpen :<|> _) = Client.client (Proxy @Slack.API) header
+                  where
+                    header = "Bearer " <> slackSocketKey
+
+            let (_ :<|> chatPostMessage) = Client.client (Proxy @Slack.API) header
+                  where
+                    header = "Bearer " <> slackAPIKey
 
             retrying do
                 url <- runClient slackEnv do
