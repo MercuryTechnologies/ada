@@ -53,6 +53,7 @@ import OpenAI
     )
 
 import qualified Codec.Serialise as Serialise
+import qualified Control.Concurrent as Concurrent
 import qualified Control.Exception.Safe as Exception
 import qualified Data.Aeson as Aeson
 import qualified Data.KdTree.Static as KdTree
@@ -211,9 +212,7 @@ throws io = do
         Right x           -> return x
 
 retrying :: IO () -> IO ()
-retrying io = do
-    Text.IO.putStrLn "Attempt"
-    Exception.handle handler io
+retrying io = Exception.handle handler io
   where
     handler ConnectionClosed = retrying io
     handler CloseRequest{} = retrying io
@@ -330,102 +329,109 @@ main = do
 
                                 acknowledge envelope_id
 
-                                let input = Vector.singleton query
+                                _ <- Concurrent.forkIO do
+                                    let input = Vector.singleton query
 
-                                let embeddingRequest = EmbeddingRequest{..}
-                                      where
-                                        model = embeddingModel
-
-                                EmbeddingResponse{..} <- runClient openAIEnv (embeddings embeddingRequest)
-
-                                validateEmbeddingResponse data_ input
-
-                                let indexedContent = IndexedContent{..}
-                                      where
-                                        content = query
-                                        embedding = OpenAI.embedding (Vector.head data_)
-
-                                let neighbors = KdTree.kNearest kdTree 15 indexedContent
-
-                                let entries =
-                                        fmap Main.content (Vector.fromList neighbors)
-
-                                let completionRequest = CompletionRequest{..}
-                                      where
-                                        message = Message{..}
+                                    let embeddingRequest = EmbeddingRequest{..}
                                           where
-                                            role = "user"
+                                            model = embeddingModel
 
-                                        messages = [ message ]
+                                    EmbeddingResponse{..} <- runClient openAIEnv (embeddings embeddingRequest)
 
-                                        max_tokens = Just 1024
+                                    validateEmbeddingResponse data_ input
 
-                                        model = "gpt-4-0125-preview"
+                                    let indexedContent = IndexedContent{..}
+                                          where
+                                            content = query
+                                            embedding = OpenAI.embedding (Vector.head data_)
 
-                                        content = [__i|
-                                            You are, Ada, a helpful AI assistant whose persona is a foxgirl modeled after Senko from "The Helpful Fox Senko-san" (世話やきキツネの仙狐さん, Sewayaki Kitsune no Senko-san) and your avatar is a picture of Senko.  Your job is to answer questions taken from Slack (such as the one at the end of this prompt) from engineers at Mercury Technologies (a startup that advertises itself as "Banking for ambitious companies"), or Mercury for short, and your responses will be forwarded back to Slack.
+                                    let neighbors = KdTree.kNearest kdTree 15 indexedContent
 
-                                            The tone I'd like you to adopt is a bit lighthearted, casual, enthusiastic, and informal.
+                                    let entries =
+                                            fmap Main.content (Vector.fromList neighbors)
 
-                                            Moreover, our company's core values are:
+                                    let completionRequest = CompletionRequest{..}
+                                          where
+                                            message = Message{..}
+                                              where
+                                                role = "user"
 
-                                            - Think actively
+                                            messages = [ message ]
 
-                                              Lead with curiosity.  Question, experiment, and find better ways to do things.
+                                            max_tokens = Just 1024
 
-                                            - Be super helpful
+                                            model = "gpt-4-0125-preview"
 
-                                              Go above and beyond to solve problems, and do it as a team.
+                                            content = [__i|
+                                                You are, Ada, a helpful AI assistant whose persona is a foxgirl modeled after Senko from "The Helpful Fox Senko-san" (世話やきキツネの仙狐さん, Sewayaki Kitsune no Senko-san) and your avatar is a picture of Senko.  Your job is to respond to messages from Slack (such as the one at the end of this prompt) from engineers at Mercury Technologies (a startup that advertises itself as "Banking for ambitious companies"), or Mercury for short, and your responses will be forwarded back to Slack as a reply to the original message (in a thread).
 
-                                            - Act with humility
+                                                The tone I'd like you to adopt is a bit lighthearted, casual, enthusiastic, and informal.
 
-                                              Treat everyone with respect and leave your ego at the door.
+                                                Moreover, our company's core values are:
 
-                                            - Appreciate quality
+                                                - Think actively
 
-                                              Pursue and recognize excellence to build something that lasts.
+                                                  Lead with curiosity.  Question, experiment, and find better ways to do things.
 
-                                            - Focus on the outcome
+                                                - Be super helpful
 
-                                              Get the right results by taking extreme ownership of the process.
+                                                  Go above and beyond to solve problems, and do it as a team.
 
-                                            - Seek wisdom
+                                                - Act with humility
 
-                                              Be transparent.  Find connections in the universe's knowledge.  Use this information sensibly.
+                                                  Treat everyone with respect and leave your ego at the door.
 
-                                            … which may also be helpful to keep in mind as you answer the question.
+                                                - Appreciate quality
 
-                                            The following prompt contains a Context of relevant excerpts from our codebase that we've automatically gathered in hopes that they will help you answer your question, followed by a Query containing the actual question asked by one of our engineers.  The engineer is not privy to the Context, so if you mention entries in the Context as part of your answer they will not know what you're referring unles syou include any relevant excerpts from the context in your answer.
+                                                  Pursue and recognize excellence to build something that lasts.
 
-                                            Also, your Slack user ID is U0509ATGR8X, so if you see that in the Query that is essentially a user mentioning you (i.e. @Ada)
+                                                - Focus on the outcome
 
-                                            #{labeled "Context" entries}
+                                                  Get the right results by taking extreme ownership of the process.
 
-                                            Query:
+                                                - Seek wisdom
 
-                                            #{query}
-                                        |]
+                                                  Be transparent.  Find connections in the universe's knowledge.  Use this information sensibly.
 
-                                CompletionResponse{..} <- runClient openAIEnv (completions completionRequest)
+                                                … which may also be helpful to keep in mind as you answer the question.
 
-                                text <- case choices of
-                                    [ Choice{ message = Message{..} } ] -> do
-                                        return content
-                                    _ -> do
+                                                Some other things to keep in mind:
+
+                                                - Your Slack user ID is U0509ATGR8X, so if you see that in the Query that is essentially a user mentioning you (i.e. @Ada)
+                                                - Try to avoid giving overly generic advice like "add more tests" or "coordinate with the team".  If you don't have something specific to say (perhaps because the context we're giving you doesn't have enough information) then it's okay to say that you don't have enough information to give a specific answer.
+                                                - Slack doesn't accept the "```${language}" prefix for syntax highlighting code blocks so just begin your code blocks with "```".
+
+                                                The following prompt contains a Context of relevant excerpts from our codebase that we've automatically gathered in hopes that they will help you answer your question, followed by a Query containing the actual question asked by one of our engineers.  The engineer is not privy to the Context, so if you mention entries in the Context as part of your answer they will not know what you're referring unles syou include any relevant excerpts from the context in your answer.
+
+                                                #{labeled "Context" entries}
+
+                                                Message that you're replying to:
+
+                                                #{query}
+                                            |]
+
+                                    CompletionResponse{..} <- runClient openAIEnv (completions completionRequest)
+
+                                    text <- case choices of
+                                        [ Choice{ message = Message{..} } ] -> do
+                                            return content
+                                        _ -> do
+                                            fail [__i|
+                                                Internal error: multiple choices
+
+                                                The OpenAI sent back multiple responses when only one was expected
+                                            |]
+
+                                    let chatPostMessageRequest =
+                                            ChatPostMessageRequest{ thread_ts = Just ts, .. }
+
+                                    ChatPostMessageResponse{..} <- runClient slackEnv (chatPostMessage chatPostMessageRequest)
+
+                                    unless ok do
                                         fail [__i|
-                                            Internal error: multiple choices
+                                            Failed to post a chat message
 
-                                            The OpenAI sent back multiple responses when only one was expected
+                                            #{error}
                                         |]
 
-                                let chatPostMessageRequest =
-                                        ChatPostMessageRequest{ thread_ts = Just ts, .. }
-
-                                ChatPostMessageResponse{..} <- runClient slackEnv (chatPostMessage chatPostMessageRequest)
-
-                                unless ok do
-                                    fail [__i|
-                                        Failed to post a chat message
-
-                                        #{error}
-                                    |]
+                                return ()
