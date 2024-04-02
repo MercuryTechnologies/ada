@@ -57,7 +57,7 @@ type API =
     :>  "api"
     :>  (AppsConnectionsOpen :<|> ChatPostMessage)
 
-data Event
+data SocketEvent
     = Hello{ }
     | EventsAPI
         { envelope_id :: Text
@@ -66,7 +66,7 @@ data Event
     | Disconnect
     deriving stock (Generic, Show)
 
-instance FromJSON Event where
+instance FromJSON SocketEvent where
     parseJSON = Aeson.genericParseJSON Aeson.defaultOptions
         { constructorTagModifier = Aeson.camelTo2 '_'
         , sumEncoding =
@@ -76,11 +76,11 @@ instance FromJSON Event where
         }
 
 data Payload = Payload
-    { event :: PayloadEvent
+    { event :: Event
     } deriving stock (Generic, Show)
       deriving anyclass (FromJSON)
 
-data PayloadEvent = PayloadEvent
+data Event = Event
     { ts :: Text
     , channel :: Text
     , text :: Text

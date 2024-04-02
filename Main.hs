@@ -39,7 +39,7 @@ import Slack
     , ChatPostMessageResponse(..)
     , Event(..)
     , Payload(..)
-    , PayloadEvent(..)
+    , SocketEvent(..)
     )
 
 import OpenAI
@@ -323,7 +323,7 @@ main = do
 
                             EventsAPI{..} -> do
                                 let Payload{ event = event_ } = payload
-                                let PayloadEvent{ text = query, ..} = event_
+                                let Event{ text = query, ..} = event_
 
                                 acknowledge envelope_id
 
@@ -399,7 +399,7 @@ main = do
                                                 - Try to avoid giving overly generic advice like "add more tests" or "coordinate with the team".  If you don't have something specific to say (perhaps because the context we're giving you doesn't have enough information) then it's okay to say that you don't have enough information to give a specific answer.
                                                 - Slack doesn't accept the "```${language}" prefix for syntax highlighting code blocks so just begin your code blocks with "```".
 
-                                                The following prompt contains a (non-exhaustive) Context of up to 15 relevant excerpts from our codebase that we've automatically gathered in hopes that they will help you answer your question, followed by a message containing the actual question asked by one of our engineers.  The engineer is not privy to the Context, so if you mention entries in the Context as part of your answer they will not know what you're referring to unless you include any relevant excerpts from the context in your answer.
+                                                The following prompt contains a (non-exhaustive) Context of up to 15 relevant excerpts from our codebase that we've automatically gathered in hopes that they will help you respond, followed by a message containing the actual Slack message from one of our engineers.  The engineer is not privy to the Context, so if you mention entries in the Context as part of your answer they will not know what you're referring to unless you include any relevant excerpts from the context in your answer.
 
                                                 #{labeled "Context" entries}
 
