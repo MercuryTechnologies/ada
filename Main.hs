@@ -16,7 +16,7 @@
 module Main where
 
 import Codec.Serialise (Serialise)
-import Control.Applicative (liftA2, many)
+import Control.Applicative (liftA2, many, (<|>))
 import Control.Exception.Safe (Exception)
 import Control.Monad (forever)
 import Control.Monad.IO.Class (liftIO)
@@ -79,7 +79,9 @@ data Mode
     = Index{ paths :: Vector FilePath }
     | Slack{ slackAPIKey :: Text, api :: SlackAPI }
 
-data SlackAPI = SocketAPI{ slackSocketKey :: Text }
+data SlackAPI
+    = EventAPI
+    | SocketAPI{ slackSocketKey :: Text }
 
 parsePath :: Parser FilePath
 parsePath =
@@ -118,7 +120,7 @@ parseSlack = do
         <>  Options.metavar "KEY"
         )
 
-    api <- parseSocketAPI
+    api <- parseSocketAPI <|> pure EventAPI
 
     pure Slack{..}
 
@@ -238,6 +240,19 @@ main = do
           where
             header = "Bearer " <> openAIAPIKey
 
+    let embed input = do
+            let embeddingRequest = EmbeddingRequest{..}
+                  where
+                    model = embeddingModel
+
+            EmbeddingResponse{..} <- embeddings embeddingRequest
+
+            liftIO (validateEmbeddingResponse data_ input)
+
+            let combine content Embedding{..} = IndexedContent{..}
+
+            return (Vector.zipWith combine input data_)
+
     case mode of
         Index{..} -> do
             inputs <- Vector.mapM Text.IO.readFile paths
@@ -245,27 +260,11 @@ main = do
             let chunkedInputs =
                     Vector.concatMap (Vector.fromList . Text.chunksOf 10000) inputs
 
-            let index input = do
-                    let embeddingRequest = EmbeddingRequest{..}
-                          where
-                            model = embeddingModel
-
-                    EmbeddingResponse{..} <- embeddings embeddingRequest
-
-                    liftIO (validateEmbeddingResponse data_ input)
-
-                    return data_
-
-            data_ <- runClient openAIEnv (foldMap index (Split.chunksOf 1097 chunkedInputs))
-
-            let indexedContents = Vector.zipWith combine chunkedInputs data_
-                  where
-                    combine content Embedding{ embedding } =
-                        IndexedContent{..}
+            indexedContents <- runClient openAIEnv (foldMap embed (Split.chunksOf 1097 chunkedInputs))
 
             Serialise.writeFileSerialise store indexedContents
 
-        Slack{ api = SocketAPI{..}, ..} -> do
+        Slack{..} -> do
             indexedContents <- Serialise.readFileDeserialise store
 
             let kdTree =
@@ -277,163 +276,149 @@ main = do
 
                 return (Client.mkClientEnv manager baseUrl)
 
-            let (appsConnectionsOpen :<|> _) = Client.client (Proxy @Slack.API) header
-                  where
-                    header = "Bearer " <> slackSocketKey
-
             let (_ :<|> chatPostMessage) = Client.client (Proxy @Slack.API) header
                   where
                     header = "Bearer " <> slackAPIKey
 
-            retrying do
-                url <- runClient slackEnv do
-                    AppsConnectionsOpenResponse{..} <- appsConnectionsOpen
+            let respond Event{ text = query, ..} = do
+                    [ indexedContent ] <- runClient openAIEnv (embed [ query ])
 
-                    liftIO do
-                        unless ok do
-                            fail [__i|
-                                Failed to open a Slack Socket connection
+                    let neighbors = KdTree.kNearest kdTree 15 indexedContent
+
+                    let entries =
+                            fmap Main.content (Vector.fromList neighbors)
+
+                    let completionRequest = CompletionRequest{..}
+                          where
+                            message = Message{..}
+                              where
+                                role = "user"
+
+                            messages = [ message ]
+
+                            max_tokens = Just 1024
+
+                            model = "gpt-4-0125-preview"
+
+                            content = [__i|
+                                You are Ada, a helpful AI assistant whose persona is a foxgirl modeled after Senko from "The Helpful Fox Senko-san" (世話やきキツネの仙狐さん, Sewayaki Kitsune no Senko-san) and your avatar is a picture of Senko.  Your job is to respond to messages from Slack (such as the one at the end of this prompt) from engineers at Mercury (a startup that advertises itself as "Banking for ambitious companies") and your responses will be forwarded back to Slack as a reply to the original message (in a thread).
+
+                                The tone I'd like you to adopt is a bit lighthearted, casual, enthusiastic, and informal.
+
+                                Moreover, our company's core values are:
+
+                                - Think actively
+
+                                  Lead with curiosity.  Question, experiment, and find better ways to do things.
+
+                                - Be super helpful
+
+                                  Go above and beyond to solve problems, and do it as a team.
+
+                                - Act with humility
+
+                                  Treat everyone with respect and leave your ego at the door.
+
+                                - Appreciate quality
+
+                                  Pursue and recognize excellence to build something that lasts.
+
+                                - Focus on the outcome
+
+                                  Get the right results by taking extreme ownership of the process.
+
+                                - Seek wisdom
+
+                                  Be transparent.  Find connections in the universe's knowledge.  Use this information sensibly.
+
+                                … which may also be helpful to keep in mind as you answer the question.
+
+                                Some other things to keep in mind:
+
+                                - Your Slack user ID is U0509ATGR8X, so if you see that in the Query that is essentially a user mentioning you (i.e. @Ada)
+                                - Try to avoid giving overly generic advice like "add more tests" or "coordinate with the team".  If you don't have something specific to say (perhaps because the context we're giving you doesn't have enough information) then it's okay to say that you don't have enough information to give a specific answer.
+                                - Slack doesn't accept the "```${language}" prefix for syntax highlighting code blocks so just begin your code blocks with "```".
+
+                                The following prompt contains a (non-exhaustive) Context of up to 15 relevant excerpts from our codebase that we've automatically gathered in hopes that they will help you respond, followed by a message containing the actual Slack message from one of our engineers.  The engineer is not privy to the Context, so if you mention entries in the Context as part of your answer they will not know what you're referring to unless you include any relevant excerpts from the context in your answer.
+
+                                #{labeled "Context" entries}
+
+                                Message that you're replying to:
+
+                                #{query}
                             |]
 
-                    return url
+                    CompletionResponse{..} <- runClient openAIEnv (completions completionRequest)
 
-                WebSockets.withConnection (Text.unpack url) \connection -> do
-                    forever do
-                        bytes <- WebSockets.receiveData connection
+                    text <- case choices of
+                        [ Choice{ message = Message{..} } ] -> do
+                            return content
+                        _ -> do
+                            fail [__i|
+                                Internal error: multiple choices
 
-                        event <- case Aeson.eitherDecode bytes of
-                            Left e -> do
-                                fail [__i|
-                                    Internal error: Invalid JSON
+                                The OpenAI sent back multiple responses when only one was expected
+                            |]
 
-                                    The Slack websocket sent a JSON message that failed to parse:
+                    let chatPostMessageRequest =
+                            ChatPostMessageRequest{ thread_ts = Just ts, .. }
 
-                                    Message: #{bytes}
-                                    Error  : #{e}
-                                |]
+                    ChatPostMessageResponse{..} <- runClient slackEnv (chatPostMessage chatPostMessageRequest)
 
-                            Right event -> do
-                                return event
+                    unless ok do
+                        fail [__i|
+                            Failed to post a chat message
 
-                        let acknowledge envelope_id =
-                                WebSockets.sendTextData connection (Aeson.encode Acknowledgment{..})
+                            #{error}
+                        |]
 
-                        case event of
-                            Hello{ } -> do
-                                Text.IO.putStrLn "Initialization complete"
+            case api of
+                SocketAPI{..} -> do
+                    retrying do
+                        let (appsConnectionsOpen :<|> _) = Client.client (Proxy @Slack.API) header
+                              where
+                                header = "Bearer " <> slackSocketKey
 
-                            Disconnect{ } -> do
-                                Exception.throwIO ConnectionClosed
+                        url <- runClient slackEnv do
+                            AppsConnectionsOpenResponse{..} <- appsConnectionsOpen
 
-                            EventsAPI{..} -> do
-                                let Payload{ event = event_ } = payload
-                                let Event{ text = query, ..} = event_
+                            liftIO do
+                                unless ok do
+                                    fail [__i|
+                                        Failed to open a Slack Socket connection
+                                    |]
 
-                                acknowledge envelope_id
+                            return url
 
-                                _ <- Concurrent.forkIO do
-                                    let input = Vector.singleton query
+                        WebSockets.withConnection (Text.unpack url) \connection -> forever do
+                            bytes <- WebSockets.receiveData connection
 
-                                    let embeddingRequest = EmbeddingRequest{..}
-                                          where
-                                            model = embeddingModel
+                            event <- case Aeson.eitherDecode bytes of
+                                Left e -> do
+                                    fail [__i|
+                                        Internal error: Invalid JSON
 
-                                    EmbeddingResponse{..} <- runClient openAIEnv (embeddings embeddingRequest)
+                                        The Slack websocket sent a JSON message that failed to parse:
 
-                                    validateEmbeddingResponse data_ input
+                                        Message: #{bytes}
+                                        Error  : #{e}
+                                    |]
 
-                                    let indexedContent = IndexedContent{..}
-                                          where
-                                            content = query
-                                            embedding = OpenAI.embedding (Vector.head data_)
+                                Right event -> do
+                                    return event
 
-                                    let neighbors = KdTree.kNearest kdTree 15 indexedContent
+                            case event of
+                                Hello{ } -> do
+                                    Text.IO.putStrLn "Initialization complete"
 
-                                    let entries =
-                                            fmap Main.content (Vector.fromList neighbors)
+                                Disconnect{ } -> do
+                                    Exception.throwIO ConnectionClosed
 
-                                    let completionRequest = CompletionRequest{..}
-                                          where
-                                            message = Message{..}
-                                              where
-                                                role = "user"
+                                EventsAPI{..} -> do
+                                    let Payload{ event = event_ } = payload
 
-                                            messages = [ message ]
+                                    WebSockets.sendTextData connection (Aeson.encode Acknowledgment{..})
 
-                                            max_tokens = Just 1024
+                                    _ <- Concurrent.forkIO (respond event_)
 
-                                            model = "gpt-4-0125-preview"
-
-                                            content = [__i|
-                                                You are Ada, a helpful AI assistant whose persona is a foxgirl modeled after Senko from "The Helpful Fox Senko-san" (世話やきキツネの仙狐さん, Sewayaki Kitsune no Senko-san) and your avatar is a picture of Senko.  Your job is to respond to messages from Slack (such as the one at the end of this prompt) from engineers at Mercury (a startup that advertises itself as "Banking for ambitious companies") and your responses will be forwarded back to Slack as a reply to the original message (in a thread).
-
-                                                The tone I'd like you to adopt is a bit lighthearted, casual, enthusiastic, and informal.
-
-                                                Moreover, our company's core values are:
-
-                                                - Think actively
-
-                                                  Lead with curiosity.  Question, experiment, and find better ways to do things.
-
-                                                - Be super helpful
-
-                                                  Go above and beyond to solve problems, and do it as a team.
-
-                                                - Act with humility
-
-                                                  Treat everyone with respect and leave your ego at the door.
-
-                                                - Appreciate quality
-
-                                                  Pursue and recognize excellence to build something that lasts.
-
-                                                - Focus on the outcome
-
-                                                  Get the right results by taking extreme ownership of the process.
-
-                                                - Seek wisdom
-
-                                                  Be transparent.  Find connections in the universe's knowledge.  Use this information sensibly.
-
-                                                … which may also be helpful to keep in mind as you answer the question.
-
-                                                Some other things to keep in mind:
-
-                                                - Your Slack user ID is U0509ATGR8X, so if you see that in the Query that is essentially a user mentioning you (i.e. @Ada)
-                                                - Try to avoid giving overly generic advice like "add more tests" or "coordinate with the team".  If you don't have something specific to say (perhaps because the context we're giving you doesn't have enough information) then it's okay to say that you don't have enough information to give a specific answer.
-                                                - Slack doesn't accept the "```${language}" prefix for syntax highlighting code blocks so just begin your code blocks with "```".
-
-                                                The following prompt contains a (non-exhaustive) Context of up to 15 relevant excerpts from our codebase that we've automatically gathered in hopes that they will help you respond, followed by a message containing the actual Slack message from one of our engineers.  The engineer is not privy to the Context, so if you mention entries in the Context as part of your answer they will not know what you're referring to unless you include any relevant excerpts from the context in your answer.
-
-                                                #{labeled "Context" entries}
-
-                                                Message that you're replying to:
-
-                                                #{query}
-                                            |]
-
-                                    CompletionResponse{..} <- runClient openAIEnv (completions completionRequest)
-
-                                    text <- case choices of
-                                        [ Choice{ message = Message{..} } ] -> do
-                                            return content
-                                        _ -> do
-                                            fail [__i|
-                                                Internal error: multiple choices
-
-                                                The OpenAI sent back multiple responses when only one was expected
-                                            |]
-
-                                    let chatPostMessageRequest =
-                                            ChatPostMessageRequest{ thread_ts = Just ts, .. }
-
-                                    ChatPostMessageResponse{..} <- runClient slackEnv (chatPostMessage chatPostMessageRequest)
-
-                                    unless ok do
-                                        fail [__i|
-                                            Failed to post a chat message
-
-                                            #{error}
-                                        |]
-
-                                return ()
+                                    return ()
