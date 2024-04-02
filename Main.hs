@@ -30,6 +30,7 @@ import Options.Applicative (Parser, ParserInfo, ParserPrefs(..))
 import Prelude hiding (error)
 import Servant.API ((:<|>)(..))
 import Servant.Client (ClientEnv, ClientM)
+import Network.Wai.Handler.Warp (Port)
 import Network.WebSockets.Client (ConnectionException(..))
 
 import Slack
@@ -39,6 +40,8 @@ import Slack
     , ChatPostMessageResponse(..)
     , Event(..)
     , Payload(..)
+    , ServerRequest(..)
+    , ServerResponse(..)
     , SocketEvent(..)
     )
 
@@ -63,10 +66,12 @@ import qualified Data.Vector as Vector
 import qualified Data.Vector.Split as Split
 import qualified Network.HTTP.Client as HTTP
 import qualified Network.HTTP.Client.TLS as TLS
+import qualified Network.Wai.Handler.Warp as Warp
 import qualified Network.WebSockets.Client as WebSockets
 import qualified OpenAI
 import qualified Options.Applicative as Options
 import qualified Servant.Client as Client
+import qualified Servant.Server as Server
 import qualified Slack
 
 instance Semigroup a => Semigroup (ClientM a) where
@@ -80,7 +85,7 @@ data Mode
     | Slack{ slackAPIKey :: Text, api :: SlackAPI }
 
 data SlackAPI
-    = EventAPI
+    = EventAPI{ port :: Port }
     | SocketAPI{ slackSocketKey :: Text }
 
 parsePath :: Parser FilePath
@@ -102,6 +107,17 @@ parseIndexInfo =
         parseIndex
         (Options.progDesc "Generate the index for the AI assistant")
 
+parseEventAPI :: Parser SlackAPI
+parseEventAPI = do
+    port <- Options.option Options.auto
+        (   Options.long "port"
+        <>  Options.help "Server port to listen on"
+        <>  Options.metavar "PORT"
+        <>  Options.value 80
+        )
+
+    pure EventAPI{..}
+
 parseSocketAPI :: Parser SlackAPI
 parseSocketAPI = do
     slackSocketKey <- Options.strOption
@@ -120,7 +136,7 @@ parseSlack = do
         <>  Options.metavar "KEY"
         )
 
-    api <- parseSocketAPI <|> pure EventAPI
+    api <- parseSocketAPI <|> parseEventAPI
 
     pure Slack{..}
 
@@ -236,7 +252,7 @@ main = do
 
         return (Client.mkClientEnv manager baseUrl)
 
-    let (embeddings :<|> completions) = Client.client (Proxy @OpenAI.API) header
+    let (embeddings :<|> completions) = Client.client @OpenAI.API Proxy header
           where
             header = "Bearer " <> openAIAPIKey
 
@@ -276,7 +292,7 @@ main = do
 
                 return (Client.mkClientEnv manager baseUrl)
 
-            let (_ :<|> chatPostMessage) = Client.client (Proxy @Slack.API) header
+            let (_ :<|> chatPostMessage) = Client.client @Slack.Client Proxy header
                   where
                     header = "Bearer " <> slackAPIKey
 
@@ -372,10 +388,24 @@ main = do
                             #{error}
                         |]
 
+            let ready = Text.IO.putStrLn "Initialization complete"
+
             case api of
+                EventAPI{..} -> do
+                    ready
+
+                    let server URLVerification{..} = do
+                            pure ChallengeResponse{..}
+                        server EventCallback{..} = liftIO do
+                            _ <- Concurrent.forkIO (respond event)
+
+                            return EmptyResponse{ }
+
+                    Warp.run port (Server.serve @Slack.Server Proxy server)
+
                 SocketAPI{..} -> do
                     retrying do
-                        let (appsConnectionsOpen :<|> _) = Client.client (Proxy @Slack.API) header
+                        let (appsConnectionsOpen :<|> _) = Client.client @Slack.Client Proxy header
                               where
                                 header = "Bearer " <> slackSocketKey
 
@@ -393,7 +423,7 @@ main = do
                         WebSockets.withConnection (Text.unpack url) \connection -> forever do
                             bytes <- WebSockets.receiveData connection
 
-                            event <- case Aeson.eitherDecode bytes of
+                            socketEvent <- case Aeson.eitherDecode bytes of
                                 Left e -> do
                                     fail [__i|
                                         Internal error: Invalid JSON
@@ -404,21 +434,21 @@ main = do
                                         Error  : #{e}
                                     |]
 
-                                Right event -> do
-                                    return event
+                                Right socketEvent -> do
+                                    return socketEvent
 
-                            case event of
+                            case socketEvent of
                                 Hello{ } -> do
-                                    Text.IO.putStrLn "Initialization complete"
+                                    ready
 
                                 Disconnect{ } -> do
                                     Exception.throwIO ConnectionClosed
 
                                 EventsAPI{..} -> do
-                                    let Payload{ event = event_ } = payload
+                                    let Payload{..} = payload
 
                                     WebSockets.sendTextData connection (Aeson.encode Acknowledgment{..})
 
-                                    _ <- Concurrent.forkIO (respond event_)
+                                    _ <- Concurrent.forkIO (respond event)
 
                                     return ()

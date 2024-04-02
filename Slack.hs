@@ -3,11 +3,12 @@
 {-# LANGUAGE DeriveGeneric         #-}
 {-# LANGUAGE DerivingStrategies    #-}
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE OverloadedLists       #-}
 {-# LANGUAGE TypeOperators         #-}
 
 module Slack where
 
-import Data.Aeson (FromJSON(..), Options(..), SumEncoding(..), ToJSON)
+import Data.Aeson (FromJSON(..), Options(..), SumEncoding(..), ToJSON(..))
 import Data.Text (Text)
 import GHC.Generics (Generic)
 
@@ -23,6 +24,22 @@ import Servant.API
     )
 
 import qualified Data.Aeson as Aeson
+
+fromJSONOptions :: Options
+fromJSONOptions = Aeson.defaultOptions
+    { constructorTagModifier = Aeson.camelTo2 '_'
+    , sumEncoding =
+        TaggedObject{ tagFieldName = "type", contentsFieldName = "" }
+    , allNullaryToStringTag = False
+    , tagSingleConstructors = True
+    }
+
+toJSONOptions :: Options
+toJSONOptions = Aeson.defaultOptions
+    { sumEncoding = UntaggedValue
+    , allNullaryToStringTag = False
+    , tagSingleConstructors = True
+    }
 
 data AppsConnectionsOpenResponse = AppsConnectionsOpenResponse
     { ok :: Bool
@@ -52,7 +69,7 @@ type ChatPostMessage =
     :>  ReqBody '[JSON] ChatPostMessageRequest
     :>  Post '[JSON] ChatPostMessageResponse
 
-type API =
+type Client =
         Header' [Required, Strict]  "Authorization" Text
     :>  "api"
     :>  (AppsConnectionsOpen :<|> ChatPostMessage)
@@ -67,13 +84,7 @@ data SocketEvent
     deriving stock (Generic, Show)
 
 instance FromJSON SocketEvent where
-    parseJSON = Aeson.genericParseJSON Aeson.defaultOptions
-        { constructorTagModifier = Aeson.camelTo2 '_'
-        , sumEncoding =
-            TaggedObject{ tagFieldName = "type", contentsFieldName = "" }
-        , allNullaryToStringTag = False
-        , tagSingleConstructors = True
-        }
+    parseJSON = Aeson.genericParseJSON fromJSONOptions
 
 data Payload = Payload
     { event :: Event
@@ -91,3 +102,27 @@ data Acknowledgment = Acknowledgment
     { envelope_id :: Text
     } deriving stock (Generic, Show)
       deriving anyclass (ToJSON)
+
+data ServerRequest
+    = URLVerification{ token :: Text, challenge :: Text }
+    | EventCallback{ event :: Event }
+    deriving stock (Generic, Show)
+
+instance FromJSON ServerRequest where
+    parseJSON = Aeson.genericParseJSON fromJSONOptions
+
+data ServerResponse
+    = ChallengeResponse{ challenge :: Text }
+    | EmptyResponse
+    deriving stock (Generic, Show)
+
+instance ToJSON ServerResponse where
+    toJSON EmptyResponse = Aeson.Object []
+    toJSON value = Aeson.genericToJSON toJSONOptions value
+
+    toEncoding EmptyResponse = toEncoding (Aeson.Object [])
+    toEncoding value = Aeson.genericToEncoding toJSONOptions value
+
+type Server =
+        ReqBody '[JSON] ServerRequest
+    :>  Post '[JSON] ServerResponse
