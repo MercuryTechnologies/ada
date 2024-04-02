@@ -76,8 +76,10 @@ instance Monoid a => Monoid (ClientM a) where
     mempty = pure mempty
 
 data Mode
-    = Index{ store :: FilePath, paths :: Vector FilePath }
-    | Query{ store :: FilePath , slackAPIKey :: Text, slackSocketKey :: Text }
+    = Index{ paths :: Vector FilePath }
+    | Slack{ slackAPIKey :: Text, api :: SlackAPI }
+
+data SlackAPI = SocketAPI{ slackSocketKey :: Text }
 
 parsePath :: Parser FilePath
 parsePath =
@@ -86,18 +88,8 @@ parsePath =
         <>  Options.action "file"
         )
 
-parseIndexPath :: Parser FilePath
-parseIndexPath =
-    Options.strOption
-        (   Options.long "store"
-        <>  Options.metavar "FILE"
-        <>  Options.action "file"
-        )
-
 parseIndex :: Parser Mode
 parseIndex = do
-    store <- parseIndexPath
-
     paths <- fmap Vector.fromList (many parsePath)
 
     return Index{..}
@@ -108,32 +100,37 @@ parseIndexInfo =
         parseIndex
         (Options.progDesc "Generate the index for the AI assistant")
 
-parseQuery :: Parser Mode
-parseQuery = do
-    store <- parseIndexPath
-
-    slackAPIKey <- Options.strOption
-        (   Options.long "slack-api-key"
-        <>  Options.help "Slack API key"
-        <>  Options.metavar "KEY"
-        )
-
+parseSocketAPI :: Parser SlackAPI
+parseSocketAPI = do
     slackSocketKey <- Options.strOption
         (   Options.long "slack-socket-key"
         <>  Options.help "Slack socket key"
         <>  Options.metavar "KEY"
         )
 
-    pure Query{..}
+    pure SocketAPI{..}
 
-parseQueryInfo :: ParserInfo Mode
-parseQueryInfo =
+parseSlack :: Parser Mode
+parseSlack = do
+    slackAPIKey <- Options.strOption
+        (   Options.long "slack-api-key"
+        <>  Options.help "Slack API key"
+        <>  Options.metavar "KEY"
+        )
+
+    api <- parseSocketAPI
+
+    pure Slack{..}
+
+parseSlackInfo :: ParserInfo Mode
+parseSlackInfo =
     Options.info
-        parseQuery
-        (Options.progDesc "Ask the AI assistant a question")
+        parseSlack
+        (Options.progDesc "Ask the AI assistant questions via Slack")
 
 data Options = Options
     { openAIAPIKey :: Text
+    , store :: FilePath
     , mode :: Mode
     }
 
@@ -145,9 +142,15 @@ parseOptions = do
         <>  Options.metavar "KEY"
         )
 
+    store <- Options.strOption
+        (   Options.long "store"
+        <>  Options.metavar "FILE"
+        <>  Options.action "file"
+        )
+
     mode <- Options.hsubparser
         (   Options.command "index" parseIndexInfo
-        <>  Options.command "query" parseQueryInfo
+        <>  Options.command "query" parseSlackInfo
         )
 
     return Options{..}
@@ -261,7 +264,8 @@ main = do
                         IndexedContent{..}
 
             Serialise.writeFileSerialise store indexedContents
-        Query{..} -> do
+
+        Slack{ api = SocketAPI{..}, ..} -> do
             indexedContents <- Serialise.readFileDeserialise store
 
             let kdTree =
