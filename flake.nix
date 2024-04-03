@@ -1,5 +1,5 @@
 { inputs = {
-    nixpkgs.url = github:NixOS/nixpkgs/release-22.11;
+    nixpkgs.url = github:NixOS/nixpkgs/release-23.11;
 
     utils.url = github:numtide/flake-utils;
   };
@@ -23,7 +23,14 @@
                     ada = ./.;
                   })
                   (hself: hsuper: {
-                    skews = self.haskell.lib.dontCheck hsuper.skews;
+                    skews =
+                      self.haskell.lib.dontCheck
+                        (self.haskell.lib.unmarkBroken hsuper.skews);
+
+                    kdt = self.haskell.lib.unmarkBroken hsuper.kdt;
+
+                    wss-client =
+                      self.haskell.lib.unmarkBroken hsuper.wss-client;
                   })
                 ];
           });
