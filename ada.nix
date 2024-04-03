@@ -37,7 +37,7 @@
           };
         in
           ''
-            ada${lib.toGNUCommandLineShell options} --openai-key "$(< ${lib.escapeShellArg config.services.ada.openAIKeyFile})" --slack-api-key "$(< ${lib.escapeShellArg config.services.ada.slackKeyFile})"
+            ada${lib.cli.toGNUCommandLineShell { } options} --openai-key "$(< ${lib.escapeShellArg config.services.ada.openAIKeyFile})" --slack-api-key "$(< ${lib.escapeShellArg config.services.ada.slackKeyFile})"
           '';
     };
   };
