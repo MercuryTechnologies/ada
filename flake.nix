@@ -1,15 +1,21 @@
 { inputs = {
-    nixpkgs.url = github:NixOS/nixpkgs/release-23.11;
+    flake-compat = {
+      url = "github:edolstra/flake-compat/v1.0.1";
 
-    utils.url = github:numtide/flake-utils;
+      flake = false;
+    };
+
+    nixpkgs.url = "github:NixOS/nixpkgs/release-23.11";
+
+    flake-utils.url = "github:numtide/flake-utils/v1.0.0";
   };
 
-  outputs = { nixpkgs, utils, ... }:
+  outputs = { nixpkgs, flake-utils, ... }:
     let
       overlay = import ./overlay.nix;
 
     in
-      utils.lib.eachDefaultSystem (system:
+      flake-utils.lib.eachDefaultSystem (system:
         let
           config = { };
 
