@@ -5,51 +5,32 @@
   };
 
   outputs = { nixpkgs, utils, ... }:
-    utils.lib.eachDefaultSystem (system:
-      let
-        config = { };
+    let
+      overlay = import ./overlay.nix;
 
-        overlay = self: super: {
-          ada =
-            self.haskell.lib.justStaticExecutables
-              self.haskellPackages.ada;
+    in
+      utils.lib.eachDefaultSystem (system:
+        let
+          config = { };
 
-          haskellPackages = super.haskellPackages.override (old: {
-            overrides =
-              pkgs.lib.fold
-                pkgs.lib.composeExtensions
-                (old.overrides or (_: _: { }))
-                [ (self.haskell.lib.packageSourceOverrides {
-                    ada = ./.;
-                  })
-                  (hself: hsuper: {
-                    skews =
-                      self.haskell.lib.dontCheck
-                        (self.haskell.lib.unmarkBroken hsuper.skews);
+          pkgs =
+            import nixpkgs { inherit config system; overlays = [ overlay ]; };
 
-                    kdt = self.haskell.lib.unmarkBroken hsuper.kdt;
+        in
+          rec {
+            packages.default = pkgs.haskellPackages.ada;
 
-                    wss-client =
-                      self.haskell.lib.unmarkBroken hsuper.wss-client;
-                  })
-                ];
-          });
-        };
+            apps.default = {
+              type = "app";
 
-        pkgs =
-          import nixpkgs { inherit config system; overlays = [ overlay ]; };
+              program = "${pkgs.ada}/bin/ada";
+            };
 
-      in
-        rec {
-          packages.default = pkgs.haskellPackages.ada;
+            devShells.default = pkgs.haskellPackages.ada.env;
+          }
+      ) // {
+        overlays.default = overlay;
 
-          apps.default = {
-            type = "app";
-
-            program = "${pkgs.ada}/bin/ada";
-          };
-
-          devShells.default = pkgs.haskellPackages.ada.env;
-        }
-    );
+        nixosModules.default = import ./ada.nix;
+      };
 }
