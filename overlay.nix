@@ -18,7 +18,9 @@ self: super: {
               self.haskell.lib.dontCheck
                 (self.haskell.lib.unmarkBroken hsuper.skews);
 
-            kdt = self.haskell.lib.unmarkBroken hsuper.kdt;
+            kdt =
+              self.haskell.lib.dontCheck
+                (self.haskell.lib.unmarkBroken hsuper.kdt);
 
             wss-client =
               self.haskell.lib.unmarkBroken hsuper.wss-client;
