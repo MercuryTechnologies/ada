@@ -24,6 +24,12 @@
 
       default = null;
     };
+
+    debug = lib.mkOption {
+      type = lib.types.nullOr lib.types.bool;
+
+      default = null;
+    };
   };
 
   config = {

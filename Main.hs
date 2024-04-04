@@ -1,15 +1,16 @@
-{-# LANGUAGE ApplicativeDo      #-}
-{-# LANGUAGE BlockArguments     #-}
-{-# LANGUAGE DeriveAnyClass     #-}
-{-# LANGUAGE DeriveGeneric      #-}
-{-# LANGUAGE DerivingStrategies #-}
-{-# LANGUAGE NamedFieldPuns     #-}
-{-# LANGUAGE NumericUnderscores #-}
-{-# LANGUAGE OverloadedLists    #-}
-{-# LANGUAGE OverloadedStrings  #-}
-{-# LANGUAGE QuasiQuotes        #-}
-{-# LANGUAGE RecordWildCards    #-}
-{-# LANGUAGE TypeApplications   #-}
+{-# LANGUAGE ApplicativeDo       #-}
+{-# LANGUAGE BlockArguments      #-}
+{-# LANGUAGE DeriveAnyClass      #-}
+{-# LANGUAGE DeriveGeneric       #-}
+{-# LANGUAGE DerivingStrategies  #-}
+{-# LANGUAGE NamedFieldPuns      #-}
+{-# LANGUAGE NumericUnderscores  #-}
+{-# LANGUAGE OverloadedLists     #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE QuasiQuotes         #-}
+{-# LANGUAGE RecordWildCards     #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications    #-}
 
 {-# OPTIONS_GHC -Wall -fno-warn-orphans #-}
 
@@ -17,10 +18,11 @@ module Main where
 
 import Codec.Serialise (Serialise)
 import Control.Applicative (liftA2, many, (<|>))
-import Control.Exception.Safe (Exception)
+import Control.Exception.Safe (Exception, SomeException)
 import Control.Monad (forever)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad (unless)
+import Data.ByteString.Lazy (ByteString)
 import Data.String.Interpolate (__i)
 import Data.Text (Text)
 import Data.Vector (Vector)
@@ -58,6 +60,7 @@ import OpenAI
 import qualified Codec.Serialise as Serialise
 import qualified Control.Concurrent as Concurrent
 import qualified Control.Exception.Safe as Exception
+import qualified Control.Logging as Logging
 import qualified Data.Aeson as Aeson
 import qualified Data.KdTree.Static as KdTree
 import qualified Data.Text as Text
@@ -67,6 +70,7 @@ import qualified Data.Vector.Split as Split
 import qualified Network.HTTP.Client as HTTP
 import qualified Network.HTTP.Client.TLS as TLS
 import qualified Network.Wai.Handler.Warp as Warp
+import qualified Network.Wai.Middleware.RequestLogger as RequestLogger
 import qualified Network.WebSockets.Client as WebSockets
 import qualified OpenAI
 import qualified Options.Applicative as Options
@@ -85,7 +89,7 @@ data Mode
     | Slack{ slackAPIKey :: Text, api :: SlackAPI }
 
 data SlackAPI
-    = EventAPI{ signingSecret :: Text, port :: Port }
+    = EventAPI{ signingSecret :: Text, port :: Port, debug :: Bool }
     | SocketAPI{ slackSocketKey :: Text }
 
 parsePath :: Parser FilePath
@@ -120,6 +124,11 @@ parseEventAPI = do
         (   Options.long "slack-signing-secret"
         <>  Options.help "Slack signing secret"
         <>  Options.metavar "KEY"
+        )
+
+    debug <- Options.switch
+        (   Options.long "debug"
+        <>  Options.help "Enable debug logging for incoming HTTP requests"
         )
 
     pure EventAPI{..}
@@ -236,15 +245,57 @@ throws io = do
         Left  clientError -> Exception.throwIO clientError
         Right x           -> return x
 
-retrying :: IO () -> IO ()
+retrying :: IO a -> IO a
 retrying io = Exception.handle handler io
   where
     handler ConnectionClosed = retrying io
-    handler CloseRequest{} = retrying io
-    handler _ = pure ()
+    handler CloseRequest{}   = retrying io
+    handler exception        = Exception.throwIO exception
+
+loggingExceptions :: IO a -> IO a
+loggingExceptions io = Exception.handle handler io
+  where
+    handler (exception :: SomeException) = do
+        Logging.warn (Text.pack (Exception.displayException exception))
+        loggingExceptions io
+
+data AdaException
+    = MultipleChoices
+    | PostFailure{ slackError :: Maybe Text }
+    | ConnectionFailure
+    | InvalidJSON{ bytes :: ByteString, jsonError :: Text }
+    deriving stock (Show)
+
+instance Exception AdaException where
+    displayException MultipleChoices = [__i|
+        Internal error: multiple choices
+
+        The OpenAI sent back multiple responses when only one was expected
+    |]
+
+    displayException PostFailure{..} = [__i|
+        Failed to post a chat message
+
+        #{slackError}
+    |]
+
+    displayException ConnectionFailure = [__i|
+        Failed to open a Slack Socket connection
+    |]
+
+    displayException InvalidJSON{..} = [__i|
+        Internal error: Invalid JSON
+
+        The Slack websocket sent a JSON message that failed to parse:
+
+        Message: #{bytes}
+        Error  : #{jsonError}
+    |]
+
+
 
 main :: IO ()
-main = do
+main = Logging.withStderrLogging do
     Options{..} <- Options.customExecParser parserPrefs parseOptionsInfo
 
     let managerSettings = TLS.tlsManagerSettings
@@ -286,7 +337,7 @@ main = do
 
             Serialise.writeFileSerialise store indexedContents
 
-        Slack{..} -> do
+        Slack{..} -> loggingExceptions do
             indexedContents <- Serialise.readFileDeserialise store
 
             let kdTree =
@@ -373,26 +424,15 @@ main = do
                     CompletionResponse{..} <- runClient openAIEnv (completions completionRequest)
 
                     text <- case choices of
-                        [ Choice{ message = Message{..} } ] -> do
-                            return content
-                        _ -> do
-                            fail [__i|
-                                Internal error: multiple choices
-
-                                The OpenAI sent back multiple responses when only one was expected
-                            |]
+                        [ Choice{ message = Message{..} } ] -> return content
+                        _                                   -> Exception.throwIO MultipleChoices
 
                     let chatPostMessageRequest =
                             ChatPostMessageRequest{ thread_ts = Just ts, .. }
 
                     ChatPostMessageResponse{..} <- runClient slackEnv (chatPostMessage chatPostMessageRequest)
 
-                    unless ok do
-                        fail [__i|
-                            Failed to post a chat message
-
-                            #{error}
-                        |]
+                    unless ok (Exception.throwIO PostFailure{ slackError = error })
 
             let ready = Text.IO.putStrLn "Initialization complete"
 
@@ -407,7 +447,16 @@ main = do
 
                             return EmptyResponse{ }
 
-                    Warp.run port (Slack.verificationMiddleware signingSecret (Server.serve @Slack.Server Proxy server))
+                    let application =
+                            Slack.verificationMiddleware signingSecret
+                                (Server.serve @Slack.Server Proxy server)
+
+                    let logging =
+                            if debug
+                            then RequestLogger.logStdoutDev
+                            else RequestLogger.logStdout
+
+                    Warp.run port (logging application)
 
                 SocketAPI{..} -> do
                     retrying do
@@ -418,11 +467,7 @@ main = do
                         url <- runClient slackEnv do
                             AppsConnectionsOpenResponse{..} <- appsConnectionsOpen
 
-                            liftIO do
-                                unless ok do
-                                    fail [__i|
-                                        Failed to open a Slack Socket connection
-                                    |]
+                            liftIO (unless ok (Exception.throwIO ConnectionFailure))
 
                             return url
 
@@ -430,17 +475,10 @@ main = do
                             bytes <- WebSockets.receiveData connection
 
                             socketEvent <- case Aeson.eitherDecode bytes of
-                                Left e -> do
-                                    fail [__i|
-                                        Internal error: Invalid JSON
+                                Left error ->
+                                    Exception.throwIO InvalidJSON{ jsonError = Text.pack error, .. }
 
-                                        The Slack websocket sent a JSON message that failed to parse:
-
-                                        Message: #{bytes}
-                                        Error  : #{e}
-                                    |]
-
-                                Right socketEvent -> do
+                                Right socketEvent ->
                                     return socketEvent
 
                             case socketEvent of
