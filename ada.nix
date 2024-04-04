@@ -43,7 +43,7 @@
       script =
         let
           options = {
-            inherit (config.services.ada) port store;
+            inherit (config.services.ada) port store debug;
           };
         in
           ''
