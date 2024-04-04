@@ -299,7 +299,7 @@ main = Logging.withStderrLogging do
     Options{..} <- Options.customExecParser parserPrefs parseOptionsInfo
 
     let managerSettings = TLS.tlsManagerSettings
-            { HTTP.managerResponseTimeout = HTTP.responseTimeoutMicro 55_000_000
+            { HTTP.managerResponseTimeout = HTTP.responseTimeoutMicro 148_000_000
             }
 
     manager <- TLS.newTlsManagerWith managerSettings
