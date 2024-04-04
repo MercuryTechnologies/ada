@@ -10,6 +10,8 @@ self: super: {
         (old.overrides or (_: _: { }))
         [ (self.haskell.lib.packageSourceOverrides {
             ada = ./.;
+
+            base16 = "1.0";
           })
           (hself: hsuper: {
             skews =

@@ -1,16 +1,21 @@
+{-# LANGUAGE BlockArguments        #-}
 {-# LANGUAGE DataKinds             #-}
 {-# LANGUAGE DeriveAnyClass        #-}
 {-# LANGUAGE DeriveGeneric         #-}
 {-# LANGUAGE DerivingStrategies    #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE OverloadedLists       #-}
+{-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE TypeOperators         #-}
 
 module Slack where
 
+import Control.Monad (guard)
+import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON(..), Options(..), SumEncoding(..), ToJSON(..))
 import Data.Text (Text)
 import GHC.Generics (Generic)
+import Network.Wai (Application, Request)
 
 import Servant.API
     ( Header'
@@ -23,7 +28,20 @@ import Servant.API
     , (:<|>)
     )
 
+import qualified Control.Monad.Trans.Maybe as MaybeT
+import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.Aeson as Aeson
+import qualified Data.Base16.Types as Base16.Types
+import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Base16 as Base16
+import qualified Data.ByteString.Lazy as ByteString.Lazy
+import qualified Data.Maybe as Maybe
+import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text.Encoding
+import qualified Data.Time as Time
+import qualified Data.Time.Clock.POSIX as POSIX
+import qualified Network.HTTP.Types as HTTP.Types
+import qualified Network.Wai as Wai
 
 fromJSONOptions :: Options
 fromJSONOptions = Aeson.defaultOptions
@@ -126,3 +144,51 @@ instance ToJSON ServerResponse where
 type Server =
         ReqBody '[JSON] ServerRequest
     :>  Post '[JSON] ServerResponse
+
+-- https://api.slack.com/authentication/verifying-requests-from-slack
+verify :: Text -> Request -> IO Bool
+verify signingSecret request = do
+    m <- MaybeT.runMaybeT do
+        body <- liftIO (Wai.strictRequestBody request)
+
+        Just timestampBytes <- return (lookup "X-Slack-Request-Timestamp" (Wai.requestHeaders request))
+
+        Right timestampText <- return (Text.Encoding.decodeUtf8' timestampBytes)
+
+        timestamp <- Time.parseTimeM True Time.defaultTimeLocale "%s" (Text.unpack timestampText)
+
+        now <- liftIO (POSIX.getPOSIXTime)
+
+        guard (abs (now - timestamp) <= 60 * 5)
+
+        let baseBytes =
+                ByteString.concat
+                    [ "v0:"
+                    , timestampBytes
+                    , ":"
+                    , ByteString.Lazy.toStrict body
+                    ]
+
+        let signingSecretBytes = Text.Encoding.encodeUtf8 signingSecret
+
+        let hash = SHA256.hmac signingSecretBytes baseBytes
+
+        let base16 = Base16.Types.extractBase16 (Base16.encodeBase16' hash)
+
+        let signature = "v0=" <> base16
+
+        Just xSlackSignature <- return (lookup "x-slack-signature" (Wai.requestHeaders request))
+
+        guard (signature == xSlackSignature)
+
+    return (Maybe.isJust m)
+
+verificationMiddleware :: Text -> Application -> Application
+verificationMiddleware signingSecret application request respond = do
+    verified <- verify signingSecret request
+
+    let response = Wai.responseBuilder HTTP.Types.status400 mempty mempty
+
+    if verified
+        then application request respond
+        else respond response

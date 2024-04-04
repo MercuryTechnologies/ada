@@ -11,6 +11,10 @@
       type = lib.types.path;
     };
 
+    slackSigningSecretFile = lib.mkOption {
+      type = lib.types.path;
+    };
+
     store = lib.mkOption {
       type = lib.types.path;
     };
@@ -37,7 +41,7 @@
           };
         in
           ''
-            ada${lib.cli.toGNUCommandLineShell { } options} --openai-key "$(< ${lib.escapeShellArg config.services.ada.openAIKeyFile})" --slack-api-key "$(< ${lib.escapeShellArg config.services.ada.slackKeyFile})"
+            ada${lib.cli.toGNUCommandLineShell { } options} --openai-key "$(< ${lib.escapeShellArg config.services.ada.openAIKeyFile})" --slack-api-key "$(< ${lib.escapeShellArg config.services.ada.slackKeyFile})" --slack-signing-secret "$(< ${lib.escapeShellArg config.services.ada.slackSigningSecretFile})"
           '';
     };
   };

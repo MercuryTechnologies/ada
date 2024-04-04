@@ -19,19 +19,26 @@ executable ada
   build-depends:
       base >=4.7 && <5
     , aeson
+    , base16
+    , bytestring
+    , cryptohash-sha256
     , http-client
     , http-client-tls
+    , http-types
     , kdt
+    , optparse-applicative
     , safe-exceptions
+    , serialise
     , servant
     , servant-client
     , servant-server
-    , optparse-applicative
-    , serialise
     , string-interpolate
     , text
+    , time
+    , transformers
     , vector
     , vector-split
+    , wai
     , warp
     , wss-client
   default-language: Haskell2010

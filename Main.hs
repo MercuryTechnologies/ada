@@ -85,7 +85,7 @@ data Mode
     | Slack{ slackAPIKey :: Text, api :: SlackAPI }
 
 data SlackAPI
-    = EventAPI{ port :: Port }
+    = EventAPI{ signingSecret :: Text, port :: Port }
     | SocketAPI{ slackSocketKey :: Text }
 
 parsePath :: Parser FilePath
@@ -114,6 +114,12 @@ parseEventAPI = do
         <>  Options.help "Server port to listen on"
         <>  Options.metavar "PORT"
         <>  Options.value 80
+        )
+
+    signingSecret <- Options.strOption
+        (   Options.long "slack-signing-secret"
+        <>  Options.help "Slack signing secret"
+        <>  Options.metavar "KEY"
         )
 
     pure EventAPI{..}
@@ -401,7 +407,7 @@ main = do
 
                             return EmptyResponse{ }
 
-                    Warp.run port (Server.serve @Slack.Server Proxy server)
+                    Warp.run port (Slack.verificationMiddleware signingSecret (Server.serve @Slack.Server Proxy server))
 
                 SocketAPI{..} -> do
                     retrying do
