@@ -42,12 +42,16 @@
 
       script =
         let
-          options = {
-            inherit (config.services.ada) port store debug;
+          adaOptions = {
+            inherit (config.services.ada) store;
+          };
+
+          queryOptions = {
+            inherit (config.services.ada) port debug;
           };
         in
           ''
-            ada ${lib.cli.toGNUCommandLineShell { } options} --openai-key "$(< ${lib.escapeShellArg config.services.ada.openAIKeyFile})" --slack-api-key "$(< ${lib.escapeShellArg config.services.ada.slackKeyFile})" --slack-signing-secret "$(< ${lib.escapeShellArg config.services.ada.slackSigningSecretFile})"
+            ada --openai-key "$(< ${lib.escapeShellArg config.services.ada.openAIKeyFile})" ${lib.cli.toGNUCommandLineShell { } adaOptions} query ${lib.cli.toGNUCommandLineShell { } queryOptions} --slack-api-key "$(< ${lib.escapeShellArg config.services.ada.slackKeyFile})" --slack-signing-secret "$(< ${lib.escapeShellArg config.services.ada.slackSigningSecretFile})"
           '';
     };
   };
