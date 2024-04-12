@@ -47,7 +47,7 @@
           };
         in
           ''
-            ada${lib.cli.toGNUCommandLineShell { } options} --openai-key "$(< ${lib.escapeShellArg config.services.ada.openAIKeyFile})" --slack-api-key "$(< ${lib.escapeShellArg config.services.ada.slackKeyFile})" --slack-signing-secret "$(< ${lib.escapeShellArg config.services.ada.slackSigningSecretFile})"
+            ada ${lib.cli.toGNUCommandLineShell { } options} --openai-key "$(< ${lib.escapeShellArg config.services.ada.openAIKeyFile})" --slack-api-key "$(< ${lib.escapeShellArg config.services.ada.slackKeyFile})" --slack-signing-secret "$(< ${lib.escapeShellArg config.services.ada.slackSigningSecretFile})"
           '';
     };
   };
