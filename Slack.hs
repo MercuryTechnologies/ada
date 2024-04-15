@@ -8,11 +8,15 @@
 {-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE TypeOperators         #-}
 
+{-# OPTIONS -Wno-deprecations #-}
+
 module Slack where
 
 import Control.Monad (guard)
 import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Trans.Maybe (MaybeT)
 import Data.Aeson (FromJSON(..), Options(..), SumEncoding(..), ToJSON(..))
+import Data.ByteString (ByteString)
 import Data.Text (Text)
 import GHC.Generics (Generic)
 import Network.Wai (Application, Request)
@@ -35,7 +39,7 @@ import qualified Data.Base16.Types as Base16.Types
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Base16 as Base16
 import qualified Data.ByteString.Lazy as ByteString.Lazy
-import qualified Data.Maybe as Maybe
+import qualified Data.IORef as IORef
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text.Encoding
 import qualified Data.Time as Time
@@ -146,49 +150,70 @@ type Server =
     :>  Post '[JSON] ServerResponse
 
 -- https://api.slack.com/authentication/verifying-requests-from-slack
-verify :: Text -> Request -> IO Bool
+verify :: Text -> Request -> MaybeT IO ByteString
 verify signingSecret request = do
-    m <- MaybeT.runMaybeT do
-        body <- liftIO (Wai.strictRequestBody request)
+    body <- liftIO (Wai.strictRequestBody request)
 
-        Just timestampBytes <- return (lookup "X-Slack-Request-Timestamp" (Wai.requestHeaders request))
+    Just timestampBytes <- return (lookup "X-Slack-Request-Timestamp" (Wai.requestHeaders request))
 
-        Right timestampText <- return (Text.Encoding.decodeUtf8' timestampBytes)
+    Right timestampText <- return (Text.Encoding.decodeUtf8' timestampBytes)
 
-        timestamp <- Time.parseTimeM True Time.defaultTimeLocale "%s" (Text.unpack timestampText)
+    timestamp <- Time.parseTimeM True Time.defaultTimeLocale "%s" (Text.unpack timestampText)
 
-        now <- liftIO (POSIX.getPOSIXTime)
+    now <- liftIO (POSIX.getPOSIXTime)
 
-        guard (abs (now - timestamp) <= 60 * 5)
+    guard (abs (now - timestamp) <= 60 * 5)
 
-        let baseBytes =
-                ByteString.concat
-                    [ "v0:"
-                    , timestampBytes
-                    , ":"
-                    , ByteString.Lazy.toStrict body
-                    ]
+    let baseBytes =
+            ByteString.concat
+                [ "v0:"
+                , timestampBytes
+                , ":"
+                , ByteString.Lazy.toStrict body
+                ]
 
-        let signingSecretBytes = Text.Encoding.encodeUtf8 signingSecret
+    let signingSecretBytes = Text.Encoding.encodeUtf8 signingSecret
 
-        let hash = SHA256.hmac signingSecretBytes baseBytes
+    let hash = SHA256.hmac signingSecretBytes baseBytes
 
-        let base16 = Base16.Types.extractBase16 (Base16.encodeBase16' hash)
+    let base16 = Base16.Types.extractBase16 (Base16.encodeBase16' hash)
 
-        let signature = "v0=" <> base16
+    let signature = "v0=" <> base16
 
-        Just xSlackSignature <- return (lookup "x-slack-signature" (Wai.requestHeaders request))
+    Just xSlackSignature <- return (lookup "x-slack-signature" (Wai.requestHeaders request))
 
-        guard (signature == xSlackSignature)
+    guard (signature == xSlackSignature)
 
-    return (Maybe.isJust m)
+    return (ByteString.Lazy.toStrict body)
 
 verificationMiddleware :: Text -> Application -> Application
 verificationMiddleware signingSecret application request respond = do
-    verified <- verify signingSecret request
+    verified <- MaybeT.runMaybeT (verify signingSecret request)
 
-    let response = Wai.responseBuilder HTTP.Types.status400 mempty mempty
+    case verified of
+        Just originalRequestBody -> do
+            ref <- IORef.newIORef (Just originalRequestBody)
 
-    if verified
-        then application request respond
-        else respond response
+            -- This is a hack to work around the fact that if a signing
+            -- middleware consumes the request body then it's not available
+            -- for the actual handler.  See:
+            --
+            -- https://github.com/haskell-servant/servant/issues/1120#issuecomment-1084318908
+            let fakeRequestBody = do
+                    m <- IORef.readIORef ref
+                    case m of
+                        Just bytes -> do
+                            IORef.writeIORef ref Nothing
+
+                            return bytes
+
+                        Nothing -> do
+                            return mempty
+
+            let request' = request{ Wai.requestBody = fakeRequestBody }
+
+            application request' respond
+
+        Nothing -> do
+            let response = Wai.responseBuilder HTTP.Types.status400 mempty mempty
+            respond response
