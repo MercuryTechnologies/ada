@@ -32,6 +32,7 @@ import Options.Applicative (Parser, ParserInfo, ParserPrefs(..))
 import Prelude hiding (error)
 import Servant.API ((:<|>)(..))
 import Servant.Client (ClientEnv, ClientM)
+import Network.Wai (Application)
 import Network.Wai.Handler.Warp (Port)
 import Network.WebSockets.Client (ConnectionException(..))
 
@@ -69,6 +70,8 @@ import qualified Data.Vector as Vector
 import qualified Data.Vector.Split as Split
 import qualified Network.HTTP.Client as HTTP
 import qualified Network.HTTP.Client.TLS as TLS
+import qualified Network.HTTP.Types as HTTP.Types
+import qualified Network.Wai as Wai
 import qualified Network.Wai.Handler.Warp as Warp
 import qualified Network.Wai.Middleware.RequestLogger as RequestLogger
 import qualified Network.WebSockets.Client as WebSockets
@@ -292,7 +295,12 @@ instance Exception AdaException where
         Error  : #{jsonError}
     |]
 
-
+healthCheck :: Application -> Application
+healthCheck application request respond
+    | Wai.pathInfo request == [ "health" ] = do
+        respond (Wai.responseBuilder HTTP.Types.status200 mempty mempty)
+    | otherwise = do
+        application request respond
 
 main :: IO ()
 main = Logging.withStderrLogging do
@@ -448,8 +456,10 @@ main = Logging.withStderrLogging do
                             return EmptyResponse{ }
 
                     let application =
-                            Slack.verificationMiddleware signingSecret
-                                (Server.serve @Slack.Server Proxy server)
+                            healthCheck
+                                (Slack.verificationMiddleware signingSecret
+                                    (Server.serve @Slack.Server Proxy server)
+                                )
 
                     let logging =
                             if debug
