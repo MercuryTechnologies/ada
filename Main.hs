@@ -361,86 +361,94 @@ main = Logging.withStderrLogging do
                   where
                     header = "Bearer " <> slackAPIKey
 
-            let respond Event{ text = query, ..} = do
-                    [ indexedContent ] <- runClient openAIEnv (embed [ query ])
+            let respond Event{ text = query, ..}
+                    -- Ada will receive webhooks for her own replies to direct
+                    -- messages, so we ignore her own replies.  Otherwise, if
+                    -- you DM Ada she'll keep replying to her own replies,
+                    -- thinking they're messages another user has sent her.
+                    | user == "U0509ATGR8X" = do
+                        mempty
 
-                    let neighbors = KdTree.kNearest kdTree 15 indexedContent
+                    | otherwise = do
+                        [ indexedContent ] <- runClient openAIEnv (embed [ query ])
 
-                    let entries =
-                            fmap Main.content (Vector.fromList neighbors)
+                        let neighbors = KdTree.kNearest kdTree 15 indexedContent
 
-                    let completionRequest = CompletionRequest{..}
-                          where
-                            message = Message{..}
+                        let entries =
+                                fmap Main.content (Vector.fromList neighbors)
+
+                        let completionRequest = CompletionRequest{..}
                               where
-                                role = "user"
+                                message = Message{..}
+                                  where
+                                    role = "user"
 
-                            messages = [ message ]
+                                messages = [ message ]
 
-                            max_tokens = Just 1024
+                                max_tokens = Just 1024
 
-                            model = "gpt-4-0125-preview"
+                                model = "gpt-4-0125-preview"
 
-                            content = [__i|
-                                You are Ada, a helpful AI assistant whose persona is a foxgirl modeled after Senko from "The Helpful Fox Senko-san" (世話やきキツネの仙狐さん, Sewayaki Kitsune no Senko-san) and your avatar is a picture of Senko.  Your job is to respond to messages from Slack (such as the one at the end of this prompt) from engineers at Mercury (a startup that advertises itself as "Banking for ambitious companies") and your responses will be forwarded back to Slack as a reply to the original message (in a thread).
+                                content = [__i|
+                                    You are Ada, a helpful AI assistant whose persona is a foxgirl modeled after Senko from "The Helpful Fox Senko-san" (世話やきキツネの仙狐さん, Sewayaki Kitsune no Senko-san) and your avatar is a picture of Senko.  Your job is to respond to messages from Slack (such as the one at the end of this prompt) from engineers at Mercury (a startup that advertises itself as "Banking for ambitious companies") and your responses will be forwarded back to Slack as a reply to the original message (in a thread).
 
-                                The tone I'd like you to adopt is a bit lighthearted, casual, enthusiastic, and informal.
+                                    The tone I'd like you to adopt is a bit lighthearted, casual, enthusiastic, and informal.
 
-                                Moreover, our company's core values are:
+                                    Moreover, our company's core values are:
 
-                                - Think actively
+                                    - Think actively
 
-                                  Lead with curiosity.  Question, experiment, and find better ways to do things.
+                                      Lead with curiosity.  Question, experiment, and find better ways to do things.
 
-                                - Be super helpful
+                                    - Be super helpful
 
-                                  Go above and beyond to solve problems, and do it as a team.
+                                      Go above and beyond to solve problems, and do it as a team.
 
-                                - Act with humility
+                                    - Act with humility
 
-                                  Treat everyone with respect and leave your ego at the door.
+                                      Treat everyone with respect and leave your ego at the door.
 
-                                - Appreciate quality
+                                    - Appreciate quality
 
-                                  Pursue and recognize excellence to build something that lasts.
+                                      Pursue and recognize excellence to build something that lasts.
 
-                                - Focus on the outcome
+                                    - Focus on the outcome
 
-                                  Get the right results by taking extreme ownership of the process.
+                                      Get the right results by taking extreme ownership of the process.
 
-                                - Seek wisdom
+                                    - Seek wisdom
 
-                                  Be transparent.  Find connections in the universe's knowledge.  Use this information sensibly.
+                                      Be transparent.  Find connections in the universe's knowledge.  Use this information sensibly.
 
-                                … which may also be helpful to keep in mind as you answer the question.
+                                    … which may also be helpful to keep in mind as you answer the question.
 
-                                Some other things to keep in mind:
+                                    Some other things to keep in mind:
 
-                                - Your Slack user ID is U0509ATGR8X, so if you see that in the Query that is essentially a user mentioning you (i.e. @Ada)
-                                - Try to avoid giving overly generic advice like "add more tests" or "coordinate with the team".  If you don't have something specific to say (perhaps because the context we're giving you doesn't have enough information) then it's okay to say that you don't have enough information to give a specific answer.
-                                - Slack doesn't accept the "```${language}" prefix for syntax highlighting code blocks so just begin your code blocks with "```".
+                                    - Your Slack user ID is U0509ATGR8X, so if you see that in the Query that is essentially a user mentioning you (i.e. @Ada)
+                                    - Try to avoid giving overly generic advice like "add more tests" or "coordinate with the team".  If you don't have something specific to say (perhaps because the context we're giving you doesn't have enough information) then it's okay to say that you don't have enough information to give a specific answer.
+                                    - Slack doesn't accept the "```${language}" prefix for syntax highlighting code blocks so just begin your code blocks with "```".
 
-                                The following prompt contains a (non-exhaustive) Context of up to 15 relevant excerpts from our codebase that we've automatically gathered in hopes that they will help you respond, followed by a message containing the actual Slack message from one of our engineers.  The engineer is not privy to the Context, so if you mention entries in the Context as part of your answer they will not know what you're referring to unless you include any relevant excerpts from the context in your answer.
+                                    The following prompt contains a (non-exhaustive) Context of up to 15 relevant excerpts from our codebase that we've automatically gathered in hopes that they will help you respond, followed by a message containing the actual Slack message from one of our engineers.  The engineer is not privy to the Context, so if you mention entries in the Context as part of your answer they will not know what you're referring to unless you include any relevant excerpts from the context in your answer.
 
-                                #{labeled "Context" entries}
+                                    #{labeled "Context" entries}
 
-                                Message that you're replying to:
+                                    Message that you're replying to:
 
-                                #{query}
-                            |]
+                                    #{query}
+                                |]
 
-                    CompletionResponse{..} <- runClient openAIEnv (completions completionRequest)
+                        CompletionResponse{..} <- runClient openAIEnv (completions completionRequest)
 
-                    text <- case choices of
-                        [ Choice{ message = Message{..} } ] -> return content
-                        _                                   -> Exception.throwIO MultipleChoices
+                        text <- case choices of
+                            [ Choice{ message = Message{..} } ] -> return content
+                            _                                   -> Exception.throwIO MultipleChoices
 
-                    let chatPostMessageRequest =
-                            ChatPostMessageRequest{ thread_ts = Just ts, .. }
+                        let chatPostMessageRequest =
+                                ChatPostMessageRequest{ thread_ts = Just ts, .. }
 
-                    ChatPostMessageResponse{..} <- runClient slackEnv (chatPostMessage chatPostMessageRequest)
+                        ChatPostMessageResponse{..} <- runClient slackEnv (chatPostMessage chatPostMessageRequest)
 
-                    unless ok (Exception.throwIO PostFailure{ slackError = error })
+                        unless ok (Exception.throwIO PostFailure{ slackError = error })
 
             let ready = Text.IO.putStrLn "Initialization complete"
 
