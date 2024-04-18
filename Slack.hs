@@ -117,6 +117,7 @@ data Event = Event
     { ts :: Text
     , channel :: Text
     , text :: Text
+    , user :: Text
     } deriving stock (Generic, Show)
       deriving anyclass (FromJSON)
 
