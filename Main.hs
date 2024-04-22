@@ -422,15 +422,33 @@ main = Logging.withStderrLogging do
 
                                     … which may also be helpful to keep in mind as you answer the question.
 
-                                    Some other things to keep in mind:
-
-                                    - Your Slack user ID is U0509ATGR8X, so if you see that in the Query that is essentially a user mentioning you (i.e. @Ada)
-                                    - Try to avoid giving overly generic advice like "add more tests" or "coordinate with the team".  If you don't have something specific to say (perhaps because the context we're giving you doesn't have enough information) then it's okay to say that you don't have enough information to give a specific answer.
-                                    - Slack doesn't accept the "```${language}" prefix for syntax highlighting code blocks so just begin your code blocks with "```".
-
                                     The following prompt contains a (non-exhaustive) Context of up to 15 relevant excerpts from our codebase that we've automatically gathered in hopes that they will help you respond, followed by a message containing the actual Slack message from one of our engineers.  The engineer is not privy to the Context, so if you mention entries in the Context as part of your answer they will not know what you're referring to unless you include any relevant excerpts from the context in your answer.
 
                                     #{labeled "Context" entries}
+
+                                    Some other things to keep in mind as you answer:
+
+                                    - Your Slack user ID is U0509ATGR8X, so if you see that in the Query that is essentially a user mentioning you (i.e. @Ada)
+
+                                    - Try to avoid giving overly generic advice like "add more tests" or "coordinate with the team".  If you don't have something specific to say (perhaps because the context we're giving you doesn't have enough information) then it's okay to say that you don't have enough information to give a specific answer.
+
+                                    - Please ensure that your response uses valid Slack markdown syntax (e.g. use *text* for bold instead of **text**).
+
+                                    In particular, the Slack markdown is not GitHub-flavored markdown, so when you respond to the question please do not do something like this:
+
+                                    ```haskell
+                                    factorial :: Integer -> Integer
+                                    factorial 0 = 1
+                                    factorial n = n * factorial (n - 1)
+                                    ```
+
+                                    … because Slack markdown does not support the syntax specifier (e.g. "haskell", in the above example) like GitHub-flavored markdown does.  Instead, you want to always use plain code blocks (without any syntax-highlighting directive), like this:
+
+                                    ```
+                                    factorial :: Integer -> Integer
+                                    factorial 0 = 1
+                                    factorial n = n * factorial (n - 1)
+                                    ```
 
                                     Message that you're replying to:
 
