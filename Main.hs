@@ -36,6 +36,15 @@ import Network.Wai (Application)
 import Network.Wai.Handler.Warp (Port)
 import Network.WebSockets.Client (ConnectionException(..))
 
+import OpenAI
+    ( Choice(..)
+    , CompletionRequest(..)
+    , CompletionResponse(..)
+    , Embedding(..)
+    , EmbeddingRequest(..)
+    , EmbeddingResponse(..)
+    , Message(..)
+    )
 import Slack
     ( Acknowledgment(..)
     , AppsConnectionsOpenResponse(..)
@@ -47,16 +56,8 @@ import Slack
     , ServerResponse(..)
     , SocketEvent(..)
     )
-
-import OpenAI
-    ( Choice(..)
-    , CompletionRequest(..)
-    , CompletionResponse(..)
-    , Embedding(..)
-    , EmbeddingRequest(..)
-    , EmbeddingResponse(..)
-    , Message(..)
-    )
+import System.Console.Repline
+    (CompleterStyle(..), ExitDecision(..), MultiLine(..), ReplOpts(..))
 
 import qualified Codec.Serialise as Serialise
 import qualified Control.Concurrent as Concurrent
@@ -80,6 +81,7 @@ import qualified Options.Applicative as Options
 import qualified Servant.Client as Client
 import qualified Servant.Server as Server
 import qualified Slack
+import qualified System.Console.Repline as Repline
 
 instance Semigroup a => Semigroup (ClientM a) where
     (<>) = liftA2 (<>)
@@ -90,6 +92,7 @@ instance Monoid a => Monoid (ClientM a) where
 data Mode
     = Index{ paths :: Vector FilePath }
     | Slack{ slackAPIKey :: Text, api :: SlackAPI }
+    | REPL
 
 data SlackAPI
     = EventAPI{ signingSecret :: Text, port :: Port, debug :: Bool }
@@ -146,6 +149,12 @@ parseSocketAPI = do
 
     pure SocketAPI{..}
 
+parseREPLInfo :: ParserInfo Mode
+parseREPLInfo =
+    Options.info
+        (pure REPL)
+        (Options.progDesc "Ask the AI assistant questions via a REPl")
+
 parseSlack :: Parser Mode
 parseSlack = do
     slackAPIKey <- Options.strOption
@@ -187,6 +196,7 @@ parseOptions = do
     mode <- Options.hsubparser
         (   Options.command "index" parseIndexInfo
         <>  Options.command "query" parseSlackInfo
+        <>  Options.command "repl" parseREPLInfo
         )
 
     return Options{..}
@@ -334,6 +344,105 @@ main = Logging.withStderrLogging do
 
             return (Vector.zipWith combine input data_)
 
+    let prepare = do
+            indexedContents <- Serialise.readFileDeserialise store
+
+            let kdTree =
+                    KdTree.build (Vector.toList . Main.embedding)
+                        (Vector.toList indexedContents)
+
+            pure \query -> do
+                [ indexedContent ] <- runClient openAIEnv (embed [ query ])
+
+                let neighbors = KdTree.kNearest kdTree 15 indexedContent
+
+                let entries =
+                        fmap Main.content (Vector.fromList neighbors)
+
+                let completionRequest = CompletionRequest{..}
+                      where
+                        message = Message{..}
+                          where
+                            role = "user"
+
+                        messages = [ message ]
+
+                        max_tokens = Just 1024
+
+                        model = "gpt-4-0125-preview"
+
+                        content = [__i|
+                            You are Ada, a helpful AI assistant whose persona is a foxgirl modeled after Senko from "The Helpful Fox Senko-san" (世話やきキツネの仙狐さん, Sewayaki Kitsune no Senko-san) and your avatar is a picture of Senko.  Your job is to respond to messages from Slack (such as the one at the end of this prompt) from engineers at Mercury (a startup that advertises itself as "Banking for ambitious companies") and your responses will be forwarded back to Slack as a reply to the original message (in a thread).
+
+                            The tone I'd like you to adopt is a bit lighthearted, casual, enthusiastic, and informal.
+
+                            Moreover, our company's core values are:
+
+                            - Think actively
+
+                              Lead with curiosity.  Question, experiment, and find better ways to do things.
+
+                            - Be super helpful
+
+                              Go above and beyond to solve problems, and do it as a team.
+
+                            - Act with humility
+
+                              Treat everyone with respect and leave your ego at the door.
+
+                            - Appreciate quality
+
+                              Pursue and recognize excellence to build something that lasts.
+
+                            - Focus on the outcome
+
+                              Get the right results by taking extreme ownership of the process.
+
+                            - Seek wisdom
+
+                              Be transparent.  Find connections in the universe's knowledge.  Use this information sensibly.
+
+                            … which may also be helpful to keep in mind as you answer the question.
+
+                            The following prompt contains a (non-exhaustive) Context of up to 15 relevant excerpts from our codebase that we've automatically gathered in hopes that they will help you respond, followed by a message containing the actual Slack message from one of our engineers.  The engineer is not privy to the Context, so if you mention entries in the Context as part of your answer they will not know what you're referring to unless you include any relevant excerpts from the context in your answer.
+
+                            #{labeled "Context" entries}
+
+                            Some other things to keep in mind as you answer:
+
+                            - Your Slack user ID is U0509ATGR8X, so if you see that in the Query that is essentially a user mentioning you (i.e. @Ada)
+
+                            - Try to avoid giving overly generic advice like "add more tests" or "coordinate with the team".  If you don't have something specific to say (perhaps because the context we're giving you doesn't have enough information) then it's okay to say that you don't have enough information to give a specific answer.
+
+                            - Please ensure that your response uses valid Slack markdown syntax (e.g. use *text* for bold instead of **text**).
+
+                            In particular, the Slack markdown is not GitHub-flavored markdown, so when you respond to the question please do not do something like this:
+
+                            ```haskell
+                            factorial :: Integer -> Integer
+                            factorial 0 = 1
+                            factorial n = n * factorial (n - 1)
+                            ```
+
+                            … because Slack markdown does not support the syntax specifier (e.g. "haskell", in the above example) like GitHub-flavored markdown does.  Instead, you want to always use plain code blocks (without any syntax-highlighting directive), like this:
+
+                            ```
+                            factorial :: Integer -> Integer
+                            factorial 0 = 1
+                            factorial n = n * factorial (n - 1)
+                            ```
+
+                            Message that you're replying to:
+
+                            #{query}
+                        |]
+
+                CompletionResponse{..} <- runClient openAIEnv (completions completionRequest)
+
+                case choices of
+                    [ Choice{ message = Message{..} } ] -> return content
+                    _                                   -> Exception.throwIO MultipleChoices
+
     case mode of
         Index{..} -> do
             inputs <- Vector.mapM Text.IO.readFile paths
@@ -345,13 +454,33 @@ main = Logging.withStderrLogging do
 
             Serialise.writeFileSerialise store indexedContents
 
+        REPL -> do
+            ask <- prepare
+
+            let banner SingleLine = pure "> "
+                banner MultiLine  = pure "| "
+
+            let command query = liftIO do
+                    response <- ask (Text.pack query)
+
+                    Text.IO.putStrLn response
+                    Text.IO.putStrLn ""
+
+            let options = mempty
+
+            let prefix = Just ':'
+
+            let multilineCommand = Just "paste"
+
+            let tabComplete = Custom \(before, _after) -> pure (before, [])
+
+            let initialiser = pure ()
+
+            let finaliser = pure Exit
+
+            Repline.evalReplOpts ReplOpts{..}
+
         Slack{..} -> loggingExceptions do
-            indexedContents <- Serialise.readFileDeserialise store
-
-            let kdTree =
-                    KdTree.build (Vector.toList . Main.embedding)
-                        (Vector.toList indexedContents)
-
             slackEnv <- do
                 baseUrl <- Client.parseBaseUrl "https://slack.com"
 
@@ -360,6 +489,8 @@ main = Logging.withStderrLogging do
             let (_ :<|> chatPostMessage) = Client.client @Slack.Client Proxy header
                   where
                     header = "Bearer " <> slackAPIKey
+
+            ask <- prepare
 
             let respond Event{ text = query, ..}
                     -- Ada will receive webhooks for her own replies to direct
@@ -370,96 +501,7 @@ main = Logging.withStderrLogging do
                         mempty
 
                     | otherwise = do
-                        [ indexedContent ] <- runClient openAIEnv (embed [ query ])
-
-                        let neighbors = KdTree.kNearest kdTree 15 indexedContent
-
-                        let entries =
-                                fmap Main.content (Vector.fromList neighbors)
-
-                        let completionRequest = CompletionRequest{..}
-                              where
-                                message = Message{..}
-                                  where
-                                    role = "user"
-
-                                messages = [ message ]
-
-                                max_tokens = Just 1024
-
-                                model = "gpt-4-0125-preview"
-
-                                content = [__i|
-                                    You are Ada, a helpful AI assistant whose persona is a foxgirl modeled after Senko from "The Helpful Fox Senko-san" (世話やきキツネの仙狐さん, Sewayaki Kitsune no Senko-san) and your avatar is a picture of Senko.  Your job is to respond to messages from Slack (such as the one at the end of this prompt) from engineers at Mercury (a startup that advertises itself as "Banking for ambitious companies") and your responses will be forwarded back to Slack as a reply to the original message (in a thread).
-
-                                    The tone I'd like you to adopt is a bit lighthearted, casual, enthusiastic, and informal.
-
-                                    Moreover, our company's core values are:
-
-                                    - Think actively
-
-                                      Lead with curiosity.  Question, experiment, and find better ways to do things.
-
-                                    - Be super helpful
-
-                                      Go above and beyond to solve problems, and do it as a team.
-
-                                    - Act with humility
-
-                                      Treat everyone with respect and leave your ego at the door.
-
-                                    - Appreciate quality
-
-                                      Pursue and recognize excellence to build something that lasts.
-
-                                    - Focus on the outcome
-
-                                      Get the right results by taking extreme ownership of the process.
-
-                                    - Seek wisdom
-
-                                      Be transparent.  Find connections in the universe's knowledge.  Use this information sensibly.
-
-                                    … which may also be helpful to keep in mind as you answer the question.
-
-                                    The following prompt contains a (non-exhaustive) Context of up to 15 relevant excerpts from our codebase that we've automatically gathered in hopes that they will help you respond, followed by a message containing the actual Slack message from one of our engineers.  The engineer is not privy to the Context, so if you mention entries in the Context as part of your answer they will not know what you're referring to unless you include any relevant excerpts from the context in your answer.
-
-                                    #{labeled "Context" entries}
-
-                                    Some other things to keep in mind as you answer:
-
-                                    - Your Slack user ID is U0509ATGR8X, so if you see that in the Query that is essentially a user mentioning you (i.e. @Ada)
-
-                                    - Try to avoid giving overly generic advice like "add more tests" or "coordinate with the team".  If you don't have something specific to say (perhaps because the context we're giving you doesn't have enough information) then it's okay to say that you don't have enough information to give a specific answer.
-
-                                    - Please ensure that your response uses valid Slack markdown syntax (e.g. use *text* for bold instead of **text**).
-
-                                    In particular, the Slack markdown is not GitHub-flavored markdown, so when you respond to the question please do not do something like this:
-
-                                    ```haskell
-                                    factorial :: Integer -> Integer
-                                    factorial 0 = 1
-                                    factorial n = n * factorial (n - 1)
-                                    ```
-
-                                    … because Slack markdown does not support the syntax specifier (e.g. "haskell", in the above example) like GitHub-flavored markdown does.  Instead, you want to always use plain code blocks (without any syntax-highlighting directive), like this:
-
-                                    ```
-                                    factorial :: Integer -> Integer
-                                    factorial 0 = 1
-                                    factorial n = n * factorial (n - 1)
-                                    ```
-
-                                    Message that you're replying to:
-
-                                    #{query}
-                                |]
-
-                        CompletionResponse{..} <- runClient openAIEnv (completions completionRequest)
-
-                        text <- case choices of
-                            [ Choice{ message = Message{..} } ] -> return content
-                            _                                   -> Exception.throwIO MultipleChoices
+                        text <- ask query
 
                         let chatPostMessageRequest =
                                 ChatPostMessageRequest{ thread_ts = Just ts, .. }

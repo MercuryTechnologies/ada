@@ -28,6 +28,7 @@ executable ada
     , kdt
     , logging
     , optparse-applicative
+    , repline
     , safe-exceptions
     , serialise
     , servant
