@@ -28,10 +28,11 @@ import Data.Text (Text)
 import Data.Vector (Vector)
 import Data.Proxy (Proxy(..))
 import GHC.Generics (Generic)
+import Network.HTTP.Types (Status(..))
 import Options.Applicative (Parser, ParserInfo, ParserPrefs(..))
 import Prelude hiding (error)
 import Servant.API ((:<|>)(..))
-import Servant.Client (ClientEnv, ClientM)
+import Servant.Client (ClientEnv, ClientError(..), ClientM, ResponseF(..))
 import Network.Wai (Application)
 import Network.Wai.Handler.Warp (Port)
 import Network.WebSockets.Client (ConnectionException(..))
@@ -82,6 +83,7 @@ import qualified Servant.Client as Client
 import qualified Servant.Server as Server
 import qualified Slack
 import qualified System.Console.Repline as Repline
+import qualified System.Directory as Directory
 
 instance Semigroup a => Semigroup (ClientM a) where
     (<>) = liftA2 (<>)
@@ -248,7 +250,18 @@ validateEmbeddingResponse data_ input = do
         |]
 
 runClient :: ClientEnv -> ClientM a -> IO a
-runClient env client = throws (Client.runClientM client env)
+runClient env client = retry503 (throws (Client.runClientM client env))
+  where
+    retry503 io = Exception.handle handler io
+      where
+        handler
+            (FailureResponse
+                _
+                Response{ responseStatusCode = Status{ statusCode = 503 } }
+            ) =
+            retry503 io
+        handler e =
+            Exception.throwIO e
 
 throws :: Exception e => IO (Either e a) -> IO a
 throws io = do
@@ -445,12 +458,50 @@ main = Logging.withStderrLogging do
 
     case mode of
         Index{..} -> do
-            inputs <- Vector.mapM Text.IO.readFile paths
+            let toInputs :: FilePath -> IO [Text]
+                toInputs path = do
+                    text <- Text.IO.readFile path
 
-            let chunkedInputs =
-                    Vector.concatMap (Vector.fromList . Text.chunksOf 10000) inputs
+                    let chunkSize = 10000
 
-            indexedContents <- runClient openAIEnv (foldMap embed (Split.chunksOf 1097 chunkedInputs))
+                    let chunks = Text.chunksOf 10000 text
+
+                    case chunks of
+                        [ chunk ] -> do
+                            return do
+                                return [__i|
+                                    Path: #{path}
+                                    Contents:
+
+                                    #{chunk}
+                                |]
+                        _ -> do
+                            return do
+                                (begin, chunk) <- zip [ 0, chunkSize.. ] chunks
+                                let end = begin + Text.length chunk
+
+                                return [__i|
+                                    Path: #{path}
+                                    Characters: #{begin}-#{end}
+                                    Contents:
+
+                                    #{chunk}
+                                |]
+
+            inputss <- mapM toInputs paths
+
+            let inputs = Vector.fromList (concat inputss)
+
+            exists <- Directory.doesFileExist store
+
+            oldIndexedContents <- do
+                if exists
+                    then Serialise.readFileDeserialise store
+                    else return []
+
+            newIndexedContents <- runClient openAIEnv (foldMap embed (Split.chunksOf 1097 inputs))
+
+            let indexedContents = oldIndexedContents <> newIndexedContents
 
             Serialise.writeFileSerialise store indexedContents
 
