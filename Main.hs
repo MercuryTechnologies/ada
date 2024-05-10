@@ -11,6 +11,7 @@
 {-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications    #-}
+{-# LANGUAGE ViewPatterns        #-}
 
 {-# OPTIONS_GHC -Wall -fno-warn-orphans #-}
 
@@ -25,7 +26,7 @@ import Control.Monad (unless)
 import Data.ByteString.Lazy (ByteString)
 import Data.String.Interpolate (__i)
 import Data.Text (Text)
-import Data.Vector (Vector)
+import Data.Vector (Vector, (!?))
 import Data.Proxy (Proxy(..))
 import GHC.Generics (Generic)
 import Network.HTTP.Types (Status(..))
@@ -44,13 +45,13 @@ import OpenAI
     , Embedding(..)
     , EmbeddingRequest(..)
     , EmbeddingResponse(..)
-    , Message(..)
     )
 import Slack
     ( Acknowledgment(..)
     , AppsConnectionsOpenResponse(..)
     , ChatPostMessageRequest(..)
     , ChatPostMessageResponse(..)
+    , ConversationsRepliesResponse(..)
     , Event(..)
     , Payload(..)
     , ServerRequest(..)
@@ -90,6 +91,9 @@ instance Semigroup a => Semigroup (ClientM a) where
 
 instance Monoid a => Monoid (ClientM a) where
     mempty = pure mempty
+
+safeHead :: Vector a -> Maybe a
+safeHead v = v !? 0
 
 data Mode
     = Index{ paths :: Vector FilePath }
@@ -296,7 +300,7 @@ instance Exception AdaException where
     displayException MultipleChoices = [__i|
         Internal error: multiple choices
 
-        The OpenAI sent back multiple responses when only one was expected
+        The OpenAI API sent back multiple responses when only one was expected
     |]
 
     displayException PostFailure{..} = [__i|
@@ -364,17 +368,33 @@ main = Logging.withStderrLogging do
                     KdTree.build (Vector.toList . Main.embedding)
                         (Vector.toList indexedContents)
 
-            pure \query -> do
+            return \query maybeThreadMessages -> do
                 [ indexedContent ] <- runClient openAIEnv (embed [ query ])
 
                 let neighbors = KdTree.kNearest kdTree 15 indexedContent
 
-                let entries =
+                let contextTexts =
                         fmap Main.content (Vector.fromList neighbors)
+
+                let history :: Text
+                    history =
+                        case maybeThreadMessages of
+                            Nothing -> ""
+                            Just threadMessages ->
+                                let threadMessageTexts = do
+                                        Slack.Message{..} <- threadMessages
+
+                                        return [__i|#{user}: #{text}|]
+
+                                in  [__i|
+                                    The following messages precede the message you're replying to (in a thread):
+
+                                    #{labeled "Thread Entry" threadMessageTexts}
+                                    |]
 
                 let completionRequest = CompletionRequest{..}
                       where
-                        message = Message{..}
+                        message = OpenAI.Message{..}
                           where
                             role = "user"
 
@@ -419,7 +439,7 @@ main = Logging.withStderrLogging do
 
                             The following prompt contains a (non-exhaustive) Context of up to 15 relevant excerpts from our codebase that we've automatically gathered in hopes that they will help you respond, followed by a message containing the actual Slack message from one of our engineers.  The engineer is not privy to the Context, so if you mention entries in the Context as part of your answer they will not know what you're referring to unless you include any relevant excerpts from the context in your answer.
 
-                            #{labeled "Context" entries}
+                            #{labeled "Context" contextTexts}
 
                             Some other things to keep in mind as you answer:
 
@@ -445,7 +465,9 @@ main = Logging.withStderrLogging do
                             factorial n = n * factorial (n - 1)
                             ```
 
-                            Message that you're replying to:
+                            #{history}
+
+                            Finally, here is the actual message that you're replying to:
 
                             #{query}
                         |]
@@ -453,8 +475,10 @@ main = Logging.withStderrLogging do
                 CompletionResponse{..} <- runClient openAIEnv (completions completionRequest)
 
                 case choices of
-                    [ Choice{ message = Message{..} } ] -> return content
-                    _                                   -> Exception.throwIO MultipleChoices
+                    [ Choice{ message = OpenAI.Message{..} } ] ->
+                        return content
+                    _ ->
+                        Exception.throwIO MultipleChoices
 
     case mode of
         Index{..} -> do
@@ -512,7 +536,7 @@ main = Logging.withStderrLogging do
                 banner MultiLine  = pure "| "
 
             let command query = liftIO do
-                    response <- ask (Text.pack query)
+                    response <- ask (Text.pack query) Nothing
 
                     Text.IO.putStrLn response
                     Text.IO.putStrLn ""
@@ -537,7 +561,7 @@ main = Logging.withStderrLogging do
 
                 return (Client.mkClientEnv manager baseUrl)
 
-            let (_ :<|> chatPostMessage) = Client.client @Slack.Client Proxy header
+            let (_ :<|> chatPostMessage :<|> conversationsReplies) = Client.client @Slack.Client Proxy header
                   where
                     header = "Bearer " <> slackAPIKey
 
@@ -551,13 +575,38 @@ main = Logging.withStderrLogging do
                     | user == "U0509ATGR8X" = do
                         mempty
 
-                    | otherwise = do
-                        text <- ask query
+                    | otherwise = runClient slackEnv do
+                        messages <- do
+                            -- You can't directly use the `ts` from the event supplied by the webhook
+                            -- because you supply that to the `conversations.replies` method then it will
+                            -- only return replies *after* that message in the thread.  To obtain all of
+                            -- the messages in the thread (including preceding ones), you need to fetch
+                            -- the `thread_ts` from any message in the thread and use that.
+                            --
+                            -- Interestingly enough, the easiest way to get that `thread_ts` is also using
+                            -- the same `conversation.replies` method, which is why we use that method
+                            -- twice.
+                            conversationRepliesResponse  <- conversationsReplies channel ts (Just 1)
 
-                        let chatPostMessageRequest =
-                                ChatPostMessageRequest{ thread_ts = Just ts, .. }
+                            ts2 <- case conversationRepliesResponse of
+                               ConversationsRepliesResponse{ messages = Just (safeHead -> Just Slack.Message{ thread_ts = Just ts2 }) } -> return ts2
+                               -- We'll hit this branch for a message with no replies, mainly because it
+                               -- will have no `thread_ts` field.  However, in this case, using the
+                               -- message's `ts` field is the right thing to do because the message has
+                               -- no preceding messages (since there is no thread, yet).
+                               _ -> return ts
 
-                        ChatPostMessageResponse{..} <- runClient slackEnv (chatPostMessage chatPostMessageRequest)
+                            ConversationsRepliesResponse{..} <- conversationsReplies channel ts2 Nothing
+
+                            unless ok (Exception.throwIO PostFailure{ slackError = error })
+
+                            return messages
+
+                        text <- liftIO (ask query messages)
+
+                        let chatPostMessageRequest = ChatPostMessageRequest{ thread_ts = Just ts, .. }
+
+                        ChatPostMessageResponse{..} <- chatPostMessage chatPostMessageRequest
 
                         unless ok (Exception.throwIO PostFailure{ slackError = error })
 
