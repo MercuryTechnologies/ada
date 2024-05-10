@@ -18,13 +18,17 @@ import Control.Monad.Trans.Maybe (MaybeT)
 import Data.Aeson (FromJSON(..), Options(..), SumEncoding(..), ToJSON(..))
 import Data.ByteString (ByteString)
 import Data.Text (Text)
+import Data.Vector (Vector)
 import GHC.Generics (Generic)
 import Network.Wai (Application, Request)
+import Numeric.Natural (Natural)
 
 import Servant.API
     ( Header'
     , JSON
+    , Optional
     , Post
+    , QueryParam'
     , ReqBody
     , Required
     , Strict
@@ -91,10 +95,37 @@ type ChatPostMessage =
     :>  ReqBody '[JSON] ChatPostMessageRequest
     :>  Post '[JSON] ChatPostMessageResponse
 
+data ConversationsRepliesRequest = ConversationsRepliesRequest
+    { channel :: Text
+    , ts :: Text
+    } deriving stock (Generic, Show)
+      deriving anyclass (ToJSON)
+
+data Message = Message
+    { user :: Text
+    , text :: Text
+    , thread_ts :: Maybe Text
+    } deriving stock (Generic, Show)
+      deriving anyclass (FromJSON)
+
+data ConversationsRepliesResponse = ConversationsRepliesResponse
+    { ok :: Bool
+    , error :: Maybe Text
+    , messages :: Maybe (Vector Message)
+    } deriving stock (Generic, Show)
+      deriving anyclass (FromJSON)
+
+type ConversationsReplies =
+        "conversations.replies"
+    :>  QueryParam' [Required, Strict] "channel" Text
+    :>  QueryParam' [Required, Strict] "ts" Text
+    :>  QueryParam' [Optional, Strict] "limit" Natural
+    :>  Post '[JSON] ConversationsRepliesResponse
+
 type Client =
-        Header' [Required, Strict]  "Authorization" Text
+        Header' [Required, Strict] "Authorization" Text
     :>  "api"
-    :>  (AppsConnectionsOpen :<|> ChatPostMessage)
+    :>  (AppsConnectionsOpen :<|> ChatPostMessage :<|> ConversationsReplies)
 
 data SocketEvent
     = Hello{ }
