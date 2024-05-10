@@ -586,21 +586,15 @@ main = Logging.withStderrLogging do
                             -- Interestingly enough, the easiest way to get that `thread_ts` is also using
                             -- the same `conversation.replies` method, which is why we use that method
                             -- twice.
-                            conversationRepliesResponse  <- conversationsReplies channel ts (Just 1)
+                            conversationRepliesResponse <- conversationsReplies channel ts (Just 1)
 
                             ts2 <- case conversationRepliesResponse of
-                               ConversationsRepliesResponse{ messages = Just (safeHead -> Just Slack.Message{ thread_ts = Just ts2 }) } -> return ts2
-                               -- We'll hit this branch for a message with no replies, mainly because it
-                               -- will have no `thread_ts` field.  However, in this case, using the
-                               -- message's `ts` field is the right thing to do because the message has
-                               -- no preceding messages (since there is no thread, yet).
+                               ConversationsRepliesResponse{ ok = True, messages = Just (safeHead -> Just Slack.Message{ thread_ts = Just ts2 }) } -> return ts2
                                _ -> return ts
 
                             ConversationsRepliesResponse{..} <- conversationsReplies channel ts2 Nothing
 
-                            unless ok (Exception.throwIO PostFailure{ slackError = error })
-
-                            return messages
+                            return (if ok then messages else Nothing)
 
                         text <- liftIO (ask query messages)
 
