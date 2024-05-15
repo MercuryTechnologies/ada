@@ -159,7 +159,7 @@ parseREPLInfo :: ParserInfo Mode
 parseREPLInfo =
     Options.info
         (pure REPL)
-        (Options.progDesc "Ask the AI assistant questions via a REPl")
+        (Options.progDesc "Ask the AI assistant questions via a REPL")
 
 parseSlack :: Parser Mode
 parseSlack = do
