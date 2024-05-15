@@ -32,7 +32,15 @@
               program = "${pkgs.ada}/bin/ada";
             };
 
-            devShells.default = pkgs.haskellPackages.ada.env;
+            devShells.default =
+              pkgs.mkShell {
+                inputsFrom = [ pkgs.haskellPackages.ada.env ];
+
+                packages = [
+                  pkgs.cabal-install
+                  pkgs.ghcid
+                ];
+              };
           }
       ) // {
         overlays.default = overlay;
