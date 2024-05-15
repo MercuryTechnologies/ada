@@ -33,12 +33,14 @@
             };
 
             devShells.default =
-              pkgs.haskellPackages.ada.env.overrideAttrs (attrs: {
-                buildInputs = (attrs.buildInputs or [ ]) ++ [
+              pkgs.mkShell {
+                inputsFrom = [ pkgs.haskellPackages.ada.env ];
+
+                packages = [
                   pkgs.cabal-install
                   pkgs.ghcid
                 ];
-              });
+              };
           }
       ) // {
         overlays.default = overlay;
