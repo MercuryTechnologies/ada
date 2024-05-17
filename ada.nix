@@ -15,6 +15,10 @@
       type = lib.types.path;
     };
 
+    getDXKeyFile = lib.mkOption {
+      type = lib.types.path;
+    };
+
     store = lib.mkOption {
       type = lib.types.path;
     };
@@ -51,7 +55,7 @@
           };
         in
           ''
-            ada --openai-key "$(< ${lib.escapeShellArg config.services.ada.openAIKeyFile})" ${lib.cli.toGNUCommandLineShell { } adaOptions} query ${lib.cli.toGNUCommandLineShell { } queryOptions} --slack-api-key "$(< ${lib.escapeShellArg config.services.ada.slackKeyFile})" --slack-signing-secret "$(< ${lib.escapeShellArg config.services.ada.slackSigningSecretFile})"
+            ada --openai-key "$(< ${lib.escapeShellArg config.services.ada.openAIKeyFile})" ${lib.cli.toGNUCommandLineShell { } adaOptions} query ${lib.cli.toGNUCommandLineShell { } queryOptions} --slack-api-key "$(< ${lib.escapeShellArg config.services.ada.slackKeyFile})" --slack-signing-secret "$(< ${lib.escapeShellArg config.services.ada.slackSigningSecretFile}) --getdx-key "$(< ${lib.escapeShellArg config.services.ada.getDXKeyFile})"
           '';
     };
   };
