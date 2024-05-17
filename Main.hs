@@ -18,7 +18,7 @@
 module Main where
 
 import Codec.Serialise (Serialise)
-import Control.Applicative (liftA2, many, (<|>))
+import Control.Applicative (liftA2, many, optional, (<|>))
 import Control.Exception.Safe (Exception, SomeException)
 import Control.Monad (forever)
 import Control.Monad.IO.Class (liftIO)
@@ -28,6 +28,7 @@ import Data.String.Interpolate (__i)
 import Data.Text (Text)
 import Data.Vector (Vector, (!?))
 import Data.Proxy (Proxy(..))
+import GetDX (EventsTrackRequest(..), EventsTrackResponse(..))
 import GHC.Generics (Generic)
 import Network.HTTP.Types (Status(..))
 import Options.Applicative (Parser, ParserInfo, ParserPrefs(..))
@@ -54,9 +55,13 @@ import Slack
     , ConversationsRepliesResponse(..)
     , Event(..)
     , Payload(..)
+    , Profile(..)
     , ServerRequest(..)
     , ServerResponse(..)
     , SocketEvent(..)
+    , User(..)
+    , UsersInfoRequest(..)
+    , UsersInfoResponse(..)
     )
 import System.Console.Repline
     (CompleterStyle(..), ExitDecision(..), MultiLine(..), ReplOpts(..))
@@ -71,6 +76,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.IO as Text.IO
 import qualified Data.Vector as Vector
 import qualified Data.Vector.Split as Split
+import qualified GetDX
 import qualified Network.HTTP.Client as HTTP
 import qualified Network.HTTP.Client.TLS as TLS
 import qualified Network.HTTP.Types as HTTP.Types
@@ -97,7 +103,7 @@ safeHead v = v !? 0
 
 data Mode
     = Index{ paths :: Vector FilePath }
-    | Slack{ slackAPIKey :: Text, api :: SlackAPI }
+    | Slack{ slackAPIKey :: Text, api :: SlackAPI, getDXKey :: Maybe Text }
     | REPL
 
 data SlackAPI
@@ -170,6 +176,14 @@ parseSlack = do
         )
 
     api <- parseSocketAPI <|> parseEventAPI
+
+    getDXKey <- optional
+        (Options.strOption
+            (   Options.long "getdx-api-key"
+            <>  Options.help "GetDX API key"
+            <>  Options.metavar "KEY"
+            )
+        )
 
     pure Slack{..}
 
@@ -561,9 +575,29 @@ main = Logging.withStderrLogging do
 
                 return (Client.mkClientEnv manager baseUrl)
 
-            let (_ :<|> chatPostMessage :<|> conversationsReplies) = Client.client @Slack.Client Proxy header
+            let (_ :<|> chatPostMessage :<|> conversationsReplies :<|> usersInfo) = Client.client @Slack.Client Proxy header
                   where
                     header = "Bearer " <> slackAPIKey
+
+            getDXEnv <- do
+                baseUrl <- Client.parseBaseUrl "https://api.getdx.com"
+
+                return (Client.mkClientEnv manager baseUrl)
+
+            let reportGetDX request =
+                    case getDXKey of
+                        Nothing -> do
+                            mempty
+
+                        Just key -> runClient getDXEnv do
+                            let header = "Bearer " <> key
+
+                            let eventsTrack =
+                                    Client.client @GetDX.API Proxy header
+
+                            EventsTrackResponse{} <- eventsTrack request
+
+                            pure ()
 
             ask <- prepare
 
@@ -598,11 +632,24 @@ main = Logging.withStderrLogging do
 
                         text <- liftIO (ask query messages)
 
-                        let chatPostMessageRequest = ChatPostMessageRequest{ thread_ts = Just ts, .. }
+                        do  let chatPostMessageRequest = ChatPostMessageRequest{ thread_ts = Just ts, .. }
 
-                        ChatPostMessageResponse{..} <- chatPostMessage chatPostMessageRequest
+                            ChatPostMessageResponse{..} <- chatPostMessage chatPostMessageRequest
 
-                        unless ok (Exception.throwIO PostFailure{ slackError = error })
+                            unless ok (Exception.throwIO PostFailure{ slackError = error })
+
+                        Profile{..} <- do
+                            UsersInfoResponse{ user = userRecord, ..} <- usersInfo UsersInfoRequest{..}
+
+                            unless ok (Exception.throwIO PostFailure{ slackError = error })
+
+                            let User{..} = userRecord
+
+                            return profile
+
+                        do  let timestamp = Just ts
+
+                            liftIO (reportGetDX EventsTrackRequest{..})
 
             let ready = Text.IO.putStrLn "Initialization complete"
 
