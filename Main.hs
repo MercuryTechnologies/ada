@@ -196,6 +196,8 @@ parseSlackInfo =
 data Options = Options
     { openAIAPIKey :: Text
     , store :: FilePath
+    , chatModel :: Text
+    , embeddingModel :: Text
     , mode :: Mode
     }
 
@@ -209,8 +211,21 @@ parseOptions = do
 
     store <- Options.strOption
         (   Options.long "store"
+        <>  Options.help "The path to the index"
         <>  Options.metavar "FILE"
         <>  Options.action "file"
+        )
+
+    chatModel <- Options.strOption
+        (   Options.long "chat-model"
+        <>  Options.help "The model to use for answering questions (e.g. gpt-4o)"
+        <>  Options.metavar "MODEL"
+        )
+
+    embeddingModel <- Options.strOption
+        (   Options.long "embedding-model"
+        <>  Options.help "The model to use for creating and querying the index (e.g. text-embedding-3-large)"
+        <>  Options.metavar "MODEL"
         )
 
     mode <- Options.hsubparser
@@ -239,9 +254,6 @@ data IndexedContent = IndexedContent
     , embedding :: Vector Double
     } deriving stock (Generic)
       deriving anyclass (Serialise)
-
-embeddingModel :: Text
-embeddingModel = "text-embedding-3-large"
 
 labeled :: Text -> Vector Text -> Text
 labeled label entries =
@@ -416,7 +428,7 @@ main = Logging.withStderrLogging do
 
                         max_tokens = Just 1024
 
-                        model = "gpt-4-0125-preview"
+                        model = chatModel
 
                         content = [__i|
                             You are Ada, a helpful AI assistant whose persona is a foxgirl modeled after Senko from "The Helpful Fox Senko-san" (世話やきキツネの仙狐さん, Sewayaki Kitsune no Senko-san) and your avatar is a picture of Senko.  Your job is to respond to messages from Slack (such as the one at the end of this prompt) from engineers at Mercury (a startup that advertises itself as "Banking for ambitious companies") and your responses will be forwarded back to Slack as a reply to the original message (in a thread).

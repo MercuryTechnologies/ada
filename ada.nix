@@ -3,6 +3,14 @@
 { options.services.ada = {
     enable = lib.mkEnableOption "ada";
 
+    chatModel = lib.mkOption {
+      type = lib.types.str;
+    };
+
+    embeddingModel = lib.mkOption {
+      type = lib.types.str;
+    };
+
     openAIKeyFile = lib.mkOption {
       type = lib.types.path;
     };
@@ -47,7 +55,7 @@
       script =
         let
           adaOptions = {
-            inherit (config.services.ada) store;
+            inherit (config.services.ada) chatModel embeddingModel store;
           };
 
           queryOptions = {
