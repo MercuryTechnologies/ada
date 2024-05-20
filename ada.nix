@@ -3,11 +3,11 @@
 { options.services.ada = {
     enable = lib.mkEnableOption "ada";
 
-    chatModel = lib.mkOption {
+    chat-model = lib.mkOption {
       type = lib.types.str;
     };
 
-    embeddingModel = lib.mkOption {
+    embedding-model = lib.mkOption {
       type = lib.types.str;
     };
 
@@ -55,7 +55,7 @@
       script =
         let
           adaOptions = {
-            inherit (config.services.ada) chatModel embeddingModel store;
+            inherit (config.services.ada) chat-model embedding-model store;
           };
 
           queryOptions = {
@@ -63,7 +63,7 @@
           };
         in
           ''
-            ada --openai-key "$(< ${lib.escapeShellArg config.services.ada.openAIKeyFile})" ${lib.cli.toGNUCommandLineShell { } adaOptions} query ${lib.cli.toGNUCommandLineShell { } queryOptions} --slack-api-key "$(< ${lib.escapeShellArg config.services.ada.slackKeyFile})" --slack-signing-secret "$(< ${lib.escapeShellArg config.services.ada.slackSigningSecretFile}) --getdx-key "$(< ${lib.escapeShellArg config.services.ada.getDXKeyFile})"
+            ada --openai-key "$(< ${lib.escapeShellArg config.services.ada.openAIKeyFile})" ${lib.cli.toGNUCommandLineShell { } adaOptions} query ${lib.cli.toGNUCommandLineShell { } queryOptions} --slack-api-key "$(< ${lib.escapeShellArg config.services.ada.slackKeyFile})" --slack-signing-secret "$(< ${lib.escapeShellArg config.services.ada.slackSigningSecretFile})" --getdx-api-key "$(< ${lib.escapeShellArg config.services.ada.getDXKeyFile})"
           '';
     };
   };
