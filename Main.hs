@@ -497,7 +497,7 @@ main = Logging.withStderrLogging do
                             1. **Some description**: Some text
                             2. **Another description**: Some more text
 
-                            … because that will render wrong in Slack.  It will show up neither as bold nor italics; rather Slack will display the asterisks verbatim and it will make youre response less readable.  Rather, you would instead do something like this:
+                            … because that will render wrong in Slack.  It will show up neither as bold nor italics; rather Slack will display the asterisks verbatim and it will make your response less readable.  Rather, you would instead do something like this:
 
                             1. *Some description*: Some text
                             1. *Another description*: Some more text
