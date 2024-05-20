@@ -506,7 +506,7 @@ main = Logging.withStderrLogging do
 
                             It's probably worth noting that for similar reasons you can't use *text* for italics in Slack markdown (because *text* is already reserved for bold text).  Instead you use _text_ if you want to italicize text.
 
-                            Also, you want to avoid giving answers that are *too* long.  Like, sometimes a long answer is warranted (you are trying to be helpful after all!) and if it seems like the user is looking for a comprehensive answer then it can be worth writing out a full guide.  However, generally speaking there are a few things to keep in mind that should bias you towards a shorter answer:
+                            Also, you want to err on the side of shorter answers, for a few reasons:
 
                             - Users will be more likely to tag you in on shared public threads if you keep your answers shorter
 
@@ -525,6 +525,12 @@ main = Logging.withStderrLogging do
                             Finally, here is the actual message that you're replying to:
 
                             #{query}
+
+                            \# Pre-send Checklist
+
+                            - [ ] Have I formatted bold text using *text*?
+                            - [ ] Have I formatted italics using _text_?
+                            - [ ] Have I used plain code blocks without syntax highlighting?
                         |]
 
                 CompletionResponse{..} <- runClient openAIEnv (completions completionRequest)
