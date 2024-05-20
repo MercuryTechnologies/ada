@@ -23,6 +23,7 @@ executable ada
     , bytestring
     , cryptohash-sha256
     , directory
+    , http-api-data
     , http-client
     , http-client-tls
     , http-types

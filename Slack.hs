@@ -22,9 +22,11 @@ import Data.Vector (Vector)
 import GHC.Generics (Generic)
 import Network.Wai (Application, Request)
 import Numeric.Natural (Natural)
+import Web.FormUrlEncoded (ToForm)
 
 import Servant.API
-    ( Header'
+    ( FormUrlEncoded
+    , Header'
     , JSON
     , Optional
     , Post
@@ -125,7 +127,7 @@ type ConversationsReplies =
 data UsersInfoRequest = UsersInfoRequest
     { user :: Text
     } deriving stock (Generic, Show)
-      deriving anyclass (ToJSON)
+      deriving anyclass (ToForm)
 
 data Profile = Profile
     { display_name :: Text
@@ -147,7 +149,7 @@ data UsersInfoResponse = UsersInfoResponse
 
 type UsersInfo =
         "users.info"
-    :>  ReqBody '[JSON] UsersInfoRequest
+    :>  ReqBody '[FormUrlEncoded] UsersInfoRequest
     :>  Post '[JSON] UsersInfoResponse
 
 type Client =
