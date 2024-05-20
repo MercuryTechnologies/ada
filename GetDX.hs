@@ -12,12 +12,13 @@ import GHC.Generics (Generic)
 import Servant.API (Header', JSON, Post, ReqBody, Required, Strict, (:>))
 
 data EventsTrackRequest = EventsTrackRequest
-    { timestamp :: Maybe Text
+    { name :: Text
+    , timestamp :: Text
     , email :: Text
     } deriving stock (Generic, Show)
       deriving anyclass (ToJSON)
 
-data EventsTrackResponse = EventsTrackResponse{ }
+data EventsTrackResponse = EventsTrackResponse{ ok :: Bool, error :: Maybe Text }
     deriving stock (Generic, Show)
     deriving anyclass (FromJSON)
 

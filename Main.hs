@@ -74,6 +74,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.KdTree.Static as KdTree
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text.IO
+import qualified Data.Time.Clock.POSIX as Time.POSIX
 import qualified Data.Vector as Vector
 import qualified Data.Vector.Split as Split
 import qualified GetDX
@@ -317,7 +318,7 @@ loggingExceptions io = Exception.handle handler io
 
 data AdaException
     = MultipleChoices
-    | PostFailure{ slackError :: Maybe Text }
+    | PostFailure{ error :: Maybe Text }
     | ConnectionFailure
     | InvalidJSON{ bytes :: ByteString, jsonError :: Text }
     deriving stock (Show)
@@ -332,7 +333,7 @@ instance Exception AdaException where
     displayException PostFailure{..} = [__i|
         Failed to post a chat message
 
-        #{slackError}
+        #{error}
     |]
 
     displayException ConnectionFailure = [__i|
@@ -607,9 +608,9 @@ main = Logging.withStderrLogging do
                             let eventsTrack =
                                     Client.client @GetDX.API Proxy header
 
-                            EventsTrackResponse{} <- eventsTrack request
+                            EventsTrackResponse{..} <- eventsTrack request
 
-                            pure ()
+                            unless ok (Exception.throwIO PostFailure{..})
 
             ask <- prepare
 
@@ -648,7 +649,7 @@ main = Logging.withStderrLogging do
 
                             ChatPostMessageResponse{..} <- chatPostMessage chatPostMessageRequest
 
-                            unless ok (Exception.throwIO PostFailure{ slackError = error })
+                            unless ok (Exception.throwIO PostFailure{..})
 
                         Profile{..} <- do
                             usersInfoResponse <- usersInfo UsersInfoRequest{..}
@@ -660,9 +661,13 @@ main = Logging.withStderrLogging do
 
                                 UsersInfoResponse{ error } -> do
 
-                                    Exception.throwIO PostFailure{ slackError = error }
+                                    Exception.throwIO PostFailure{..}
 
-                        do  let timestamp = Just ts
+                        do  let name = "Slack query"
+
+                            posixTime <- liftIO (Time.POSIX.getPOSIXTime)
+
+                            let timestamp = Text.pack (show (truncate posixTime :: Integer))
 
                             liftIO (reportGetDX EventsTrackRequest{..})
 
