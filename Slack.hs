@@ -141,7 +141,7 @@ data User = User
 data UsersInfoResponse = UsersInfoResponse
     { ok :: Bool
     , error :: Maybe Text
-    , user :: User
+    , user :: Maybe User
     } deriving stock (Generic, Show)
       deriving anyclass (FromJSON)
 

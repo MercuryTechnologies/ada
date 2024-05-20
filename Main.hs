@@ -651,13 +651,16 @@ main = Logging.withStderrLogging do
                             unless ok (Exception.throwIO PostFailure{ slackError = error })
 
                         Profile{..} <- do
-                            UsersInfoResponse{ user = userRecord, ..} <- usersInfo UsersInfoRequest{..}
+                            usersInfoResponse <- usersInfo UsersInfoRequest{..}
+                            case usersInfoResponse of
+                                UsersInfoResponse{ user = Just userRecord, ok = True } -> do
+                                    let User{..} = userRecord
 
-                            unless ok (Exception.throwIO PostFailure{ slackError = error })
+                                    return profile
 
-                            let User{..} = userRecord
+                                UsersInfoResponse{ error } -> do
 
-                            return profile
+                                    Exception.throwIO PostFailure{ slackError = error }
 
                         do  let timestamp = Just ts
 
