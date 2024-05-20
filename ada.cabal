@@ -15,7 +15,7 @@ source-repository head
 
 executable ada
   main-is: Main.hs
-  other-modules: Slack, OpenAI
+  other-modules: Slack, OpenAI, GetDX
   build-depends:
       base >=4.7 && <5
     , aeson
@@ -23,6 +23,7 @@ executable ada
     , bytestring
     , cryptohash-sha256
     , directory
+    , http-api-data
     , http-client
     , http-client-tls
     , http-types

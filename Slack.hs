@@ -22,9 +22,11 @@ import Data.Vector (Vector)
 import GHC.Generics (Generic)
 import Network.Wai (Application, Request)
 import Numeric.Natural (Natural)
+import Web.FormUrlEncoded (ToForm)
 
 import Servant.API
-    ( Header'
+    ( FormUrlEncoded
+    , Header'
     , JSON
     , Optional
     , Post
@@ -122,10 +124,42 @@ type ConversationsReplies =
     :>  QueryParam' [Optional, Strict] "limit" Natural
     :>  Post '[JSON] ConversationsRepliesResponse
 
+data UsersInfoRequest = UsersInfoRequest
+    { user :: Text
+    } deriving stock (Generic, Show)
+      deriving anyclass (ToForm)
+
+data Profile = Profile
+    { display_name :: Text
+    , email :: Text
+    } deriving stock (Generic, Show)
+      deriving anyclass (FromJSON)
+
+data User = User
+    { profile :: Profile
+    } deriving stock (Generic, Show)
+      deriving anyclass (FromJSON)
+
+data UsersInfoResponse = UsersInfoResponse
+    { ok :: Bool
+    , error :: Maybe Text
+    , user :: Maybe User
+    } deriving stock (Generic, Show)
+      deriving anyclass (FromJSON)
+
+type UsersInfo =
+        "users.info"
+    :>  ReqBody '[FormUrlEncoded] UsersInfoRequest
+    :>  Post '[JSON] UsersInfoResponse
+
 type Client =
         Header' [Required, Strict] "Authorization" Text
     :>  "api"
-    :>  (AppsConnectionsOpen :<|> ChatPostMessage :<|> ConversationsReplies)
+    :>  (     AppsConnectionsOpen
+        :<|>  ChatPostMessage
+        :<|>  ConversationsReplies
+        :<|>  UsersInfo
+        )
 
 data SocketEvent
     = Hello{ }
