@@ -23,23 +23,29 @@ executable ada
     , bytestring
     , cryptohash-sha256
     , directory
+    , foldl
     , http-api-data
     , http-client
     , http-client-tls
     , http-types
     , kdt
     , logging
+    , megaparsec
+    , mmark
     , optparse-applicative
+    , pretty-show
     , repline
     , safe-exceptions
     , serialise
     , servant
     , servant-client
     , servant-server
+    , sscript
     , string-interpolate
     , text
     , time
     , transformers
+    , modern-uri
     , vector
     , vector-split
     , wai

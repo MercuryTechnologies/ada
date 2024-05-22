@@ -69,10 +69,14 @@ import System.Console.Repline
 import qualified Codec.Serialise as Serialise
 import qualified Control.Concurrent as Concurrent
 import qualified Control.Exception.Safe as Exception
+import qualified Control.Foldl as Foldl
 import qualified Control.Logging as Logging
+import qualified Control.Monad as Monad
 import qualified Data.Aeson as Aeson
+import qualified Data.ByteString.Lazy as ByteString.Lazy
 import qualified Data.KdTree.Static as KdTree
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text.Encoding
 import qualified Data.Text.IO as Text.IO
 import qualified Data.Time.Clock.POSIX as Time.POSIX
 import qualified Data.Vector as Vector
@@ -92,6 +96,9 @@ import qualified Servant.Server as Server
 import qualified Slack
 import qualified System.Console.Repline as Repline
 import qualified System.Directory as Directory
+import qualified Text.Megaparsec as Megaparsec
+import qualified Text.MMark as MMark
+import qualified Text.Show.Pretty as Pretty
 
 instance Semigroup a => Semigroup (ClientM a) where
     (<>) = liftA2 (<>)
@@ -105,7 +112,7 @@ safeHead v = v !? 0
 data Mode
     = Index{ paths :: Vector FilePath }
     | Slack{ slackAPIKey :: Text, api :: SlackAPI, getDXKey :: Maybe Text }
-    | REPL
+    | REPL{ blocks :: Bool }
 
 data SlackAPI
     = EventAPI{ signingSecret :: Text, port :: Port, debug :: Bool }
@@ -162,10 +169,19 @@ parseSocketAPI = do
 
     pure SocketAPI{..}
 
+parseREPL :: Parser Mode
+parseREPL = do
+    blocks <- Options.switch
+        (   Options.long "blocks"
+        <>  Options.help "Debug Slack Blocks API by display all intermediate data structures"
+        )
+
+    pure REPL{..}
+
 parseREPLInfo :: ParserInfo Mode
 parseREPLInfo =
     Options.info
-        (pure REPL)
+        parseREPL
         (Options.progDesc "Ask the AI assistant questions via a REPL")
 
 parseSlack :: Parser Mode
@@ -474,38 +490,6 @@ main = Logging.withStderrLogging do
 
                             - Try to avoid giving overly generic advice like "add more tests" or "coordinate with the team".  If you don't have something specific to say (perhaps because the context we're giving you doesn't have enough information) then it's okay to say that you don't have enough information to give a specific answer.
 
-                            - Please ensure that your response uses valid Slack markdown syntax (e.g. use *text* for bold instead of **text**).
-
-                            In particular, the Slack markdown is not GitHub-flavored markdown, so when you respond to the question please do not do something like this:
-
-                            ```haskell
-                            factorial :: Integer -> Integer
-                            factorial 0 = 1
-                            factorial n = n * factorial (n - 1)
-                            ```
-
-                            … because Slack markdown does not support the syntax specifier (e.g. "haskell", in the above example) like GitHub-flavored markdown does.  Instead, you want to always use plain code blocks (without any syntax-highlighting directive), like this:
-
-                            ```
-                            factorial :: Integer -> Integer
-                            factorial 0 = 1
-                            factorial n = n * factorial (n - 1)
-                            ```
-
-                            Similarly, you have to use *text* for bolding text and not **text**; again, this is because Slack markdown deviates from traditional markdown syntax.  For example, you don't want to do something like this:
-
-                            1. **Some description**: Some text
-                            2. **Another description**: Some more text
-
-                            … because that will render wrong in Slack.  It will show up neither as bold nor italics; rather Slack will display the asterisks verbatim and it will make your response less readable.  Rather, you would instead do something like this:
-
-                            1. *Some description*: Some text
-                            2. *Another description*: Some more text
-
-                            … which will correctly render "Some description" and "Another description" as bold text.
-
-                            It's probably worth noting that for similar reasons you can't use *text* for italics in Slack markdown (because *text* is already reserved for bold text).  Instead you use _text_ if you want to italicize text.
-
                             Also, you want to err on the side of shorter answers, for a few reasons:
 
                             - Users will be more likely to tag you in on shared public threads if you keep your answers shorter
@@ -525,12 +509,6 @@ main = Logging.withStderrLogging do
                             Finally, here is the actual message that you're replying to:
 
                             #{query}
-
-                            \# Pre-send Checklist
-
-                            - [ ] Have I formatted bold text using *text*?
-                            - [ ] Have I formatted italics using _text_?
-                            - [ ] Have I used plain code blocks without syntax highlighting?
                         |]
 
                 CompletionResponse{..} <- runClient openAIEnv (completions completionRequest)
@@ -590,7 +568,7 @@ main = Logging.withStderrLogging do
 
             Serialise.writeFileSerialise store indexedContents
 
-        REPL -> do
+        REPL{..} -> do
             ask <- prepare
 
             let banner SingleLine = pure "> "
@@ -601,6 +579,40 @@ main = Logging.withStderrLogging do
 
                     Text.IO.putStrLn response
                     Text.IO.putStrLn ""
+
+                    Monad.when blocks do
+                        case MMark.parse mempty response of
+                            Left parseErrorBundle -> do
+                                putStrLn (Megaparsec.errorBundlePretty parseErrorBundle)
+                                putStrLn ""
+
+                            Right mmark -> do
+                                let slackBlocks =
+                                        MMark.runScanner mmark Foldl.list
+
+                                Pretty.pPrint slackBlocks
+                                Text.IO.putStrLn ""
+
+                                -- This generates a JSON expression you can
+                                -- copy and paste into JSON's block kit builder
+                                -- verbatim.
+                                let value =
+                                        Aeson.object
+                                            [ ( "blocks"
+                                              , Aeson.toJSON
+                                                    (Slack.mmarkToBlocks mmark)
+                                              )
+                                            ]
+
+                                let bytes =
+                                        ByteString.Lazy.toStrict
+                                            (Aeson.encode value)
+
+                                case Text.Encoding.decodeUtf8' bytes  of
+                                    Left _ -> mempty
+                                    Right json -> do
+                                        Text.IO.putStrLn json
+                                        Text.IO.putStrLn ""
 
             let options = mempty
 
@@ -678,8 +690,12 @@ main = Logging.withStderrLogging do
                             return (if ok then messages else Nothing)
 
                         text <- liftIO (ask query messages)
-
-                        do  let chatPostMessageRequest = ChatPostMessageRequest{ thread_ts = Just ts, .. }
+                        do  let chatPostMessageRequest =
+                                    case MMark.parse mempty text of
+                                        Left _ ->
+                                            ChatPostMessageRequest{ thread_ts = Just ts, text = Just text, blocks = Nothing, .. }
+                                        Right mmark ->
+                                            ChatPostMessageRequest{ thread_ts = Just ts, text = Nothing, blocks = Just (Slack.mmarkToBlocks mmark), .. }
 
                             ChatPostMessageResponse{..} <- chatPostMessage chatPostMessageRequest
 
