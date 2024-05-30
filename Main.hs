@@ -287,9 +287,9 @@ validateEmbeddingResponse :: Vector a -> Vector b -> IO ()
 validateEmbeddingResponse data_ input = do
     unless (Vector.length data_ == Vector.length input) do
         fail [__i|
-            Internal error: the OpenAPI API returned the wrong number of embeddings
+            Internal error: the OpenAI API returned the wrong number of embeddings
 
-            The OpenAPI API should return exactly as many embeddings as inputs that we
+            The OpenAI API should return exactly as many embeddings as inputs that we
             provided, but returned a different number of embeddings:
 
             \# of inputs provided    : #{Vector.length input}
