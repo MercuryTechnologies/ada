@@ -272,13 +272,18 @@ data IndexedContent = IndexedContent
     } deriving stock (Generic)
       deriving anyclass (Serialise)
 
-labeled :: Text -> Vector Text -> Text
-labeled label entries =
+labeled :: Maybe Text -> Vector Text -> Text
+labeled maybeLabel entries =
     Text.intercalate "\n\n" (Vector.toList (Vector.imap renderEntry entries))
   where
+    prefix =
+        case maybeLabel of
+            Nothing -> ""
+            Just label -> label <> " "
+
     renderEntry :: Int -> Text -> Text
     renderEntry index entry = [__i|
-        #{label} \##{index}:
+        #{prefix}\##{index}:
 
         #{entry}
     |]
@@ -412,7 +417,36 @@ main = Logging.withStderrLogging do
                         (Vector.toList indexedContents)
 
             return \query maybeThreadMessages -> do
-                [ indexedContent ] <- runClient openAIEnv (embed [ query ])
+                -- We prefer to embed the entire thread (if provided) instead of
+                -- just the query.  This ensures that Ada considers the content
+                -- of earlier messages in the thread when searching her index.
+                --
+                -- One way this comes in handy is when tagging her into threads.
+                -- For example, if you were to tag her in as just "@Ada"
+                -- (nothing else) and you didn't embed the thread history then
+                -- her context would likely not contain any relevant content and
+                -- then she'd have to go solely by what was said previously in
+                -- the thread, degrading the quality of her answer.
+                --
+                -- This also helps even when not tagging her into an existing
+                -- thread, like a sustained conversation with her.  If you only
+                -- embed the last question you ask her then her context will
+                -- only include stuff relevant to the very last question.
+                -- Embedding the entire thread helps her recall information
+                -- relevant to prior messages (that she might otherwise forget
+                -- about).
+                let thread =
+                        case maybeThreadMessages of
+                            Nothing ->
+                                query
+
+                            Just threadMessages ->
+                                labeled Nothing do
+                                    Slack.Message{..} <- threadMessages
+
+                                    return text
+
+                [ indexedContent ] <- runClient openAIEnv (embed [ thread ])
 
                 let neighbors = KdTree.kNearest kdTree 15 indexedContent
 
@@ -432,7 +466,7 @@ main = Logging.withStderrLogging do
                                 in  [__i|
                                     The following messages precede the message you're replying to (in a thread):
 
-                                    #{labeled "Thread Entry" threadMessageTexts}
+                                    #{labeled (Just "Thread Entry") threadMessageTexts}
                                     |]
 
                 let completionRequest = CompletionRequest{..}
@@ -482,7 +516,7 @@ main = Logging.withStderrLogging do
 
                             The following prompt contains a (non-exhaustive) Context of up to 15 relevant excerpts from our codebase that we've automatically gathered in hopes that they will help you respond, followed by a message containing the actual Slack message from one of our engineers.  The engineer is not privy to the Context, so if you mention entries in the Context as part of your answer they will not know what you're referring to unless you include any relevant excerpts from the context in your answer.
 
-                            #{labeled "Context" contextTexts}
+                            #{labeled (Just "Context") contextTexts}
 
                             Some other things to keep in mind as you answer:
 
