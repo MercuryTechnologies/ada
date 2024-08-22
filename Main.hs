@@ -75,6 +75,7 @@ import qualified Control.Monad as Monad
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as ByteString.Lazy
 import qualified Data.KdTree.Static as KdTree
+import qualified Data.Maybe as Maybe
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text.Encoding
 import qualified Data.Text.IO as Text.IO
@@ -110,7 +111,7 @@ safeHead :: Vector a -> Maybe a
 safeHead v = v !? 0
 
 data Mode
-    = Index{ paths :: Vector FilePath }
+    = Index{ sourcedFiles :: Vector SourcedFile }
     | Slack{ slackAPIKey :: Text, api :: SlackAPI, getDXKey :: Maybe Text }
     | REPL{ blocks :: Bool }
 
@@ -118,16 +119,21 @@ data SlackAPI
     = EventAPI{ signingSecret :: Text, port :: Port, debug :: Bool }
     | SocketAPI{ slackSocketKey :: Text }
 
-parsePath :: Parser FilePath
-parsePath =
-    Options.strArgument
-        (   Options.metavar "FILE"
-        <>  Options.action "file"
-        )
+data SourcedFile = SourcedFile{ source :: Maybe Text, file :: FilePath }
+
+parsePath :: Parser SourcedFile
+parsePath = do
+    source <- optional
+        (Options.strOption (Options.long "source" <> Options.metavar "SOURCE"))
+
+    file <- Options.strArgument
+        (Options.metavar "FILE" <> Options.action "file")
+
+    return SourcedFile{..}
 
 parseIndex :: Parser Mode
 parseIndex = do
-    paths <- fmap Vector.fromList (many parsePath)
+    sourcedFiles <- fmap Vector.fromList (many parsePath)
 
     return Index{..}
 
@@ -272,21 +278,9 @@ data IndexedContent = IndexedContent
     } deriving stock (Generic)
       deriving anyclass (Serialise)
 
-labeled :: Maybe Text -> Vector Text -> Text
-labeled maybeLabel entries =
-    Text.intercalate "\n\n" (Vector.toList (Vector.imap renderEntry entries))
-  where
-    prefix =
-        case maybeLabel of
-            Nothing -> ""
-            Just label -> label <> " "
-
-    renderEntry :: Int -> Text -> Text
-    renderEntry index entry = [__i|
-        #{prefix}\##{index}:
-
-        #{entry}
-    |]
+separated :: Vector Text -> Text
+separated entries =
+    Text.intercalate "\n\n---\n\n" (Vector.toList entries)
 
 validateEmbeddingResponse :: Vector a -> Vector b -> IO ()
 validateEmbeddingResponse data_ input = do
@@ -441,7 +435,7 @@ main = Logging.withStderrLogging do
                                 query
 
                             Just threadMessages ->
-                                labeled Nothing do
+                                separated do
                                     Slack.Message{..} <- threadMessages
 
                                     return text
@@ -466,7 +460,7 @@ main = Logging.withStderrLogging do
                                 in  [__i|
                                     The following messages precede the message you're replying to (in a thread):
 
-                                    #{labeled (Just "Thread Entry") threadMessageTexts}
+                                    #{separated threadMessageTexts}
                                     |]
 
                 let completionRequest = CompletionRequest{..}
@@ -514,9 +508,13 @@ main = Logging.withStderrLogging do
 
                             … which may also be helpful to keep in mind as you answer the question.
 
-                            The following prompt contains a (non-exhaustive) Context of up to 15 relevant excerpts from our codebase that we've automatically gathered in hopes that they will help you respond, followed by a message containing the actual Slack message from one of our engineers.  The engineer is not privy to the Context, so if you mention entries in the Context as part of your answer they will not know what you're referring to unless you include any relevant excerpts from the context in your answer.
+                            The following prompt contains a (non-exhaustive) context of up to 15 possibly relevant documents that we've automatically gathered in hopes that they will help you respond, followed by a message containing the actual Slack message from one of our engineers.
 
-                            #{labeled (Just "Context") contextTexts}
+                            It's *really important* that you cite your answer using any documents from the following context that you felt were essentially to your answer.  The reason we want you to cite your answer is not just so that we can check your work or learn more; we also want to encourage a culture of documentation at Mercury and the more people see that your answers are informed by well-written documentation the more our engineering organization will appreciate and incentivize better documentation.
+
+                            Possibly relevant documents:
+
+                            #{separated contextTexts}
 
                             Some other things to keep in mind as you answer:
 
@@ -555,19 +553,22 @@ main = Logging.withStderrLogging do
 
     case mode of
         Index{..} -> do
-            let toInputs :: FilePath -> IO [Text]
-                toInputs path = do
-                    text <- Text.IO.readFile path
+            let toInputs :: SourcedFile -> IO [Text]
+                toInputs SourcedFile{..} = do
+                    text <- Text.IO.readFile file
 
                     let chunkSize = 10000
 
                     let chunks = Text.chunksOf 10000 text
 
+                    let defaultedSource =
+                            Maybe.fromMaybe (Text.pack file) source
+
                     case chunks of
                         [ chunk ] -> do
                             return do
                                 return [__i|
-                                    Path: #{path}
+                                    Source: #{defaultedSource}
                                     Contents:
 
                                     #{chunk}
@@ -578,14 +579,14 @@ main = Logging.withStderrLogging do
                                 let end = begin + Text.length chunk
 
                                 return [__i|
-                                    Path: #{path}
+                                    Source: #{defaultedSource}
                                     Characters: #{begin}-#{end}
                                     Contents:
 
                                     #{chunk}
                                 |]
 
-            inputss <- mapM toInputs paths
+            inputss <- mapM toInputs sourcedFiles
 
             let inputs = Vector.fromList (concat inputss)
 
