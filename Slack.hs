@@ -457,10 +457,10 @@ blocksToRichTextElements = foldMap blockToRichTextElements
 blockToRichTextElements :: Cheapskate.Block -> [RichTextElement]
 blockToRichTextElements (Para inlines) =
     inlinesToRichTextElements inlines
-blockToRichTextElements (Cheapskate.Header indentation inlines) =
+blockToRichTextElements (Cheapskate.Header headerLevel inlines) =
     fmap enableBold (hashes : " " : inlinesToRichTextElements inlines) <>  [ "\n" ]
   where
-    hashes = fromString (replicate indentation '#')
+    hashes = fromString (replicate headerLevel '#')
 blockToRichTextElements (Blockquote blocks) =
     blocksToRichTextElements blocks
 blockToRichTextElements (List _ (Numbered wrapper startingIndex) items) = "\n" : do
