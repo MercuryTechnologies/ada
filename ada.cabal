@@ -21,17 +21,16 @@ executable ada
     , aeson
     , base16
     , bytestring
+    , cheapskate
+    , containers
     , cryptohash-sha256
     , directory
-    , foldl
     , http-api-data
     , http-client
     , http-client-tls
     , http-types
     , kdt
     , logging
-    , megaparsec
-    , mmark
     , optparse-applicative
     , pretty-show
     , repline
@@ -40,12 +39,10 @@ executable ada
     , servant
     , servant-client
     , servant-server
-    , sscript
     , string-interpolate
     , text
     , time
     , transformers
-    , modern-uri
     , vector
     , vector-split
     , wai

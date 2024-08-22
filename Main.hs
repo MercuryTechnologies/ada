@@ -69,7 +69,6 @@ import System.Console.Repline
 import qualified Codec.Serialise as Serialise
 import qualified Control.Concurrent as Concurrent
 import qualified Control.Exception.Safe as Exception
-import qualified Control.Foldl as Foldl
 import qualified Control.Logging as Logging
 import qualified Control.Monad as Monad
 import qualified Data.Aeson as Aeson
@@ -97,8 +96,6 @@ import qualified Servant.Server as Server
 import qualified Slack
 import qualified System.Console.Repline as Repline
 import qualified System.Directory as Directory
-import qualified Text.Megaparsec as Megaparsec
-import qualified Text.MMark as MMark
 import qualified Text.Show.Pretty as Pretty
 
 instance Semigroup a => Semigroup (ClientM a) where
@@ -616,38 +613,29 @@ main = Logging.withStderrLogging do
                     Text.IO.putStrLn ""
 
                     Monad.when blocks do
-                        case MMark.parse mempty response of
-                            Left parseErrorBundle -> do
-                                putStrLn (Megaparsec.errorBundlePretty parseErrorBundle)
-                                putStrLn ""
+                        let slackBlocks = Slack.markdownToBlocks response
 
-                            Right mmark -> do
-                                let slackBlocks =
-                                        MMark.runScanner mmark Foldl.list
+                        Pretty.pPrint slackBlocks
+                        Text.IO.putStrLn ""
 
-                                Pretty.pPrint slackBlocks
+                        -- This generates a JSON expression you can copy and
+                        -- paste into JSON's block kit builder verbatim.
+                        let value =
+                                Aeson.object
+                                    [ ( "blocks"
+                                      , Aeson.toJSON slackBlocks
+                                      )
+                                    ]
+
+                        let bytes =
+                                ByteString.Lazy.toStrict
+                                    (Aeson.encode value)
+
+                        case Text.Encoding.decodeUtf8' bytes  of
+                            Left _ -> mempty
+                            Right json -> do
+                                Text.IO.putStrLn json
                                 Text.IO.putStrLn ""
-
-                                -- This generates a JSON expression you can
-                                -- copy and paste into JSON's block kit builder
-                                -- verbatim.
-                                let value =
-                                        Aeson.object
-                                            [ ( "blocks"
-                                              , Aeson.toJSON
-                                                    (Slack.mmarkToBlocks mmark)
-                                              )
-                                            ]
-
-                                let bytes =
-                                        ByteString.Lazy.toStrict
-                                            (Aeson.encode value)
-
-                                case Text.Encoding.decodeUtf8' bytes  of
-                                    Left _ -> mempty
-                                    Right json -> do
-                                        Text.IO.putStrLn json
-                                        Text.IO.putStrLn ""
 
             let options = mempty
 
@@ -726,11 +714,7 @@ main = Logging.withStderrLogging do
 
                         text <- liftIO (ask query messages)
                         do  let chatPostMessageRequest =
-                                    case MMark.parse mempty text of
-                                        Left _ ->
-                                            ChatPostMessageRequest{ thread_ts = Just ts, text = Just text, blocks = Nothing, .. }
-                                        Right mmark ->
-                                            ChatPostMessageRequest{ thread_ts = Just ts, text = Nothing, blocks = Just (Slack.mmarkToBlocks mmark), .. }
+                                    ChatPostMessageRequest{ thread_ts = Just ts, text = Nothing, blocks = Just (Slack.markdownToBlocks text), .. }
 
                             ChatPostMessageResponse{..} <- chatPostMessage chatPostMessageRequest
 

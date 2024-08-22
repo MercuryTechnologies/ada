@@ -14,6 +14,10 @@ final: prev: {
             base16 = "1.0";
           })
           (hfinal: hprev: {
+            cheapskate =
+              final.haskell.lib.doJailbreak
+                (final.haskell.lib.unmarkBroken hprev.cheapskate);
+
             skews =
               final.haskell.lib.dontCheck
                 (final.haskell.lib.unmarkBroken hprev.skews);
