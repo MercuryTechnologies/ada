@@ -510,7 +510,7 @@ main = Logging.withStderrLogging do
 
                             The following prompt contains a (non-exhaustive) context of up to 15 possibly relevant documents that we've automatically gathered in hopes that they will help you respond, followed by a message containing the actual Slack message from one of our engineers.
 
-                            It's *really important* that you cite your answer using any documents from the following context that you felt were essentially to your answer.  The reason we want you to cite your answer is not just so that we can check your work or learn more; we also want to encourage a culture of documentation at Mercury and the more people see that your answers are informed by well-written documentation the more our engineering organization will appreciate and incentivize better documentation.
+                            It's *really important* that you cite your answer using any documents from the following context that you felt were essential to your answer.  The reason we want you to cite your answer is not just so that we can check your work or learn more; we also want to encourage a culture of documentation at Mercury and the more people see that your answers are informed by well-written documentation the more our engineering organization will appreciate and incentivize better documentation.
 
                             Possibly relevant documents:
 
