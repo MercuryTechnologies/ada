@@ -41,6 +41,7 @@ executable ada
     , servant-server
     , string-interpolate
     , text
+    , tiktoken
     , time
     , transformers
     , vector

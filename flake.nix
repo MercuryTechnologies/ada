@@ -5,12 +5,12 @@
       flake = false;
     };
 
-    nixpkgs.url = "github:NixOS/nixpkgs/release-23.11";
-
     flake-utils.url = "github:numtide/flake-utils/v1.0.0";
+
+    nixpkgs.url = "github:NixOS/nixpkgs/24.05";
   };
 
-  outputs = { nixpkgs, flake-utils, ... }:
+  outputs = { flake-utils, nixpkgs, ... }:
     let
       overlay = import ./overlay.nix;
 
