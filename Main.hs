@@ -361,7 +361,7 @@ toInputs SourcedFile{..} = do
     let prefix = [__i|
             Source: #{Maybe.fromMaybe (Text.pack file) source}
             Contents:
-        |] <> "\n"
+        |] <> "\n\n"
 
     let prefixBytes = Text.Encoding.encodeUtf8 prefix
 
