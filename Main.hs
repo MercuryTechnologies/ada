@@ -352,7 +352,7 @@ toInputs SourcedFile{..} = do
     -- This is currently the same across all embedding
     -- models, although that might change over time.
     -- We hardcode it for now
-    let maximumTokens = 8192
+    let maximumTokens = 8191
 
     -- This is also currently always the same across
     -- all embedding models
