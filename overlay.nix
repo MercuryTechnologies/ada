@@ -12,6 +12,12 @@ final: prev: {
             ada = ./.;
 
             base16 = "1.0";
+
+            base64 = "1.0";
+
+          })
+          (final.haskell.lib.packagesFromDirectory {
+            directory = ./nix;
           })
           (hfinal: hprev: {
             cheapskate =
@@ -27,7 +33,8 @@ final: prev: {
                 (final.haskell.lib.unmarkBroken hprev.kdt);
 
             wss-client =
-              final.haskell.lib.unmarkBroken hprev.wss-client;
+              final.haskell.lib.unmarkBroken
+                (final.haskell.lib.dontCheck hprev.wss-client);
           })
         ];
   });

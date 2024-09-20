@@ -18,26 +18,27 @@
 module Main where
 
 import Codec.Serialise (Serialise)
-import Control.Applicative (liftA2, many, optional, (<|>))
+import Control.Applicative (many, optional, (<|>))
 import Control.Exception.Safe (Exception, SomeException)
 import Control.Monad (forever)
-import Control.Monad.IO.Class (liftIO)
 import Control.Monad (unless)
+import Control.Monad.IO.Class (liftIO)
 import Data.ByteString.Lazy (ByteString)
+import Data.Proxy (Proxy(..))
 import Data.String.Interpolate (__i)
 import Data.Text (Text)
 import Data.Vector (Vector, (!?))
-import Data.Proxy (Proxy(..))
-import GetDX (EventsTrackRequest(..), EventsTrackResponse(..))
 import GHC.Generics (Generic)
+import GetDX (EventsTrackRequest(..), EventsTrackResponse(..))
 import Network.HTTP.Types (Status(..))
+import Network.Wai (Application)
+import Network.Wai.Handler.Warp (Port)
+import Network.WebSockets.Client (ConnectionException(..))
 import Options.Applicative (Parser, ParserInfo, ParserPrefs(..))
 import Prelude hiding (error)
 import Servant.API ((:<|>)(..))
 import Servant.Client (ClientEnv, ClientError(..), ClientM, ResponseF(..))
-import Network.Wai (Application)
-import Network.Wai.Handler.Warp (Port)
-import Network.WebSockets.Client (ConnectionException(..))
+import Tiktoken (Encoding)
 
 import OpenAI
     ( Choice(..)
@@ -97,6 +98,7 @@ import qualified Slack
 import qualified System.Console.Repline as Repline
 import qualified System.Directory as Directory
 import qualified Text.Show.Pretty as Pretty
+import qualified Tiktoken
 
 instance Semigroup a => Semigroup (ClientM a) where
     (<>) = liftA2 (<>)
@@ -321,6 +323,85 @@ retrying io = Exception.handle handler io
     handler CloseRequest{}   = retrying io
     handler exception        = Exception.throwIO exception
 
+chunksOf :: Int -> [a] -> [[a]]
+chunksOf n xs
+    | null xs = []
+    | otherwise = prefix : chunksOf n suffix
+  where
+    (prefix, suffix) = splitAt n xs
+
+chunksOfTokens :: Encoding -> Int -> Text -> Maybe [Text]
+chunksOfTokens encoding n text = do
+    let bytes = Text.Encoding.encodeUtf8 text
+
+    tokens <- Tiktoken.toTokens encoding bytes
+
+    let byteChunks = chunksOf n tokens
+
+    -- The result of tokenization should be valid UTF-8, but even if
+    -- it's not it's fine if we fall back with lenient decoding.
+    let tokensToText =
+            Text.Encoding.decodeUtf8Lenient . Tiktoken.fromTokens
+
+    return (map tokensToText byteChunks)
+
+toInputs :: SourcedFile -> IO [Text]
+toInputs SourcedFile{..} = do
+    text <- Text.IO.readFile file
+
+    -- This is currently the same across all embedding
+    -- models, although that might change over time.
+    -- We hardcode it for now
+    let maximumTokens = 8191
+
+    -- This is also currently always the same across
+    -- all embedding models
+    let encoding = Tiktoken.cl100k_base
+
+    let prefix = [__i|
+            Source: #{Maybe.fromMaybe (Text.pack file) source}
+            Contents:
+        |] <> "\n\n"
+
+    let prefixBytes = Text.Encoding.encodeUtf8 prefix
+
+    prefixTokens <- case Tiktoken.toTokens encoding prefixBytes of
+        Just tokens -> do
+            return (length tokens)
+        Nothing -> do
+            Exception.throwIO TokenizationFailure{ text = prefix }
+
+    -- This can *technically* undercount by one token if the input
+    -- begins with a newline, but the important thing is that this is
+    -- not an overcount.
+    --
+    -- The reason why is that `tiktoken` splits the input on whitespace
+    -- before performing byte-pair encoding.  This means that if you
+    -- split an input on a whitespace boundary to produce two halves, A
+    -- and B, then:
+    --
+    --     count(A <> B) ≤ count(A) + count(B) ≤ 1 + count(A <> B)
+    --
+    -- … or equivalently:
+    --
+    --     count(A <> B) - count(B) ≤ count(A) ≤ 1 + count(A <> B) - count(B)
+    --
+    -- … where `count` is the count of the number of tokens.  Using
+    -- variable names from this code:
+    --
+    --     maximumTokens - extraTokens ≤ remainingTokens ≤ 1 + maximumTokens - extraTokens
+    --
+    -- This means that the following `remainingTokens` definition might
+    -- undercount the number of available tokens by 1, but it won't
+    -- overcount.
+    let remainingTokens = maximumTokens - prefixTokens
+
+    chunks <- case chunksOfTokens encoding remainingTokens text of
+        Just cs -> return cs
+        Nothing -> Exception.throwIO TokenizationFailure{ text }
+
+    return (map (prefix <>) chunks)
+
 loggingExceptions :: IO a -> IO a
 loggingExceptions io = Exception.handle handler io
   where
@@ -333,6 +414,7 @@ data AdaException
     | PostFailure{ error :: Maybe Text }
     | ConnectionFailure
     | InvalidJSON{ bytes :: ByteString, jsonError :: Text }
+    | TokenizationFailure{ text :: Text }
     deriving stock (Show)
 
 instance Exception AdaException where
@@ -361,6 +443,16 @@ instance Exception AdaException where
         Error  : #{jsonError}
     |]
 
+    displayException TokenizationFailure{..} = [__i|
+        Internal error: Tokenization failed
+
+        Tokenization should never fail when using a stock encoding, but it did.
+        This likely indicates an error in the upstream tiktoken package which
+        needs to be fixed.
+
+        Text: #{show text}
+    |]
+
 healthCheck :: Application -> Application
 healthCheck application request respond
     | Wai.pathInfo request == [ "health" ] = do
@@ -371,6 +463,13 @@ healthCheck application request respond
 main :: IO ()
 main = Logging.withStderrLogging do
     Options{..} <- Options.customExecParser parserPrefs parseOptionsInfo
+
+    let encoding =
+            -- This is approximate but accurate for most use cases at the time
+            -- of this writing
+            if Text.isPrefixOf "gpt-4o-" chatModel || chatModel == "gpt-4o"
+                then Tiktoken.o200k_base
+                else Tiktoken.cl100k_base
 
     let managerSettings = TLS.tlsManagerSettings
             { HTTP.managerResponseTimeout = HTTP.responseTimeoutMicro 148_000_000
@@ -439,10 +538,54 @@ main = Logging.withStderrLogging do
 
                 [ indexedContent ] <- runClient openAIEnv (embed [ thread ])
 
-                let neighbors = KdTree.kNearest kdTree 15 indexedContent
+                -- We're not necessarily going to return every document that we
+                -- collect here.  Not only does the context window limit how
+                -- many documents we're going to return but we're not even going
+                -- to use the entire context window.  We're going to
+                -- deliberately underuse the context window to improve Ada's
+                -- attention so that she focuses on just the most relevant
+                -- documents.
+                --
+                -- We only collect this many documents because the `KdTree`
+                -- package doesn't have a way to lazily iterate over documents
+                -- from nearest to furthest, so we just guess the max number of
+                -- documents we'll ever need, conservatively.
+                let neighbors = KdTree.kNearest kdTree 55 indexedContent
+
+                -- Just like humans, models don't carefully read the entire
+                -- context and usually focus on the beginning and end and skim
+                -- the rest, especially if you give them way too much to read.
+                --
+                -- To improve attention and focus, we intentionally underutilize
+                -- the available context, only using 50K tokens out of 128K
+                -- available.
+                let contextWindowSize = 50_000
+
+                let tokenCount IndexedContent{ content = text } = do
+                        let bytes = Text.Encoding.encodeUtf8 text
+
+                        case Tiktoken.toTokens encoding bytes of
+                            Nothing -> do
+                                Exception.throwIO TokenizationFailure{ text }
+
+                            Just tokens -> do
+                                return (length tokens)
+
+                counts <- traverse tokenCount neighbors
+
+                let truncatedNeighbors =
+                        map snd
+                            (takeWhile predicate
+                                (zip cumulativeSizes neighbors)
+                            )
+                      where
+                        cumulativeSizes = scanl1 (+) counts
+
+                        predicate (cumulativeSize, _) =
+                            cumulativeSize < contextWindowSize
 
                 let contextTexts =
-                        fmap Main.content (Vector.fromList neighbors)
+                        fmap Main.content (Vector.fromList truncatedNeighbors)
 
                 let history :: Text
                     history =
@@ -550,39 +693,6 @@ main = Logging.withStderrLogging do
 
     case mode of
         Index{..} -> do
-            let toInputs :: SourcedFile -> IO [Text]
-                toInputs SourcedFile{..} = do
-                    text <- Text.IO.readFile file
-
-                    let chunkSize = 10000
-
-                    let chunks = Text.chunksOf 10000 text
-
-                    let defaultedSource =
-                            Maybe.fromMaybe (Text.pack file) source
-
-                    case chunks of
-                        [ chunk ] -> do
-                            return do
-                                return [__i|
-                                    Source: #{defaultedSource}
-                                    Contents:
-
-                                    #{chunk}
-                                |]
-                        _ -> do
-                            return do
-                                (begin, chunk) <- zip [ 0, chunkSize.. ] chunks
-                                let end = begin + Text.length chunk
-
-                                return [__i|
-                                    Source: #{defaultedSource}
-                                    Characters: #{begin}-#{end}
-                                    Contents:
-
-                                    #{chunk}
-                                |]
-
             inputss <- mapM toInputs sourcedFiles
 
             let inputs = Vector.fromList (concat inputss)
