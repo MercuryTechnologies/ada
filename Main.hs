@@ -561,19 +561,25 @@ main = Logging.withStderrLogging do
                 -- available.
                 let contextWindowSize = 50_000
 
+                let tokenCount IndexedContent{ content = text } = do
+                        let bytes = Text.Encoding.encodeUtf8 text
+
+                        case Tiktoken.toTokens encoding bytes of
+                            Nothing -> do
+                                Exception.throwIO TokenizationFailure{ text }
+
+                            Just tokens -> do
+                                return (length tokens)
+
+                counts <- traverse tokenCount neighbors
+
                 let truncatedNeighbors =
                         map snd
                             (takeWhile predicate
                                 (zip cumulativeSizes neighbors)
                             )
                       where
-                        tokenCount =
-                              length
-                            . Tiktoken.toRanks encoding
-                            . Text.Encoding.encodeUtf8
-                            . content
-
-                        cumulativeSizes = scanl1 (+) (map tokenCount neighbors)
+                        cumulativeSizes = scanl1 (+) counts
 
                         predicate (cumulativeSize, _) =
                             cumulativeSize < contextWindowSize
