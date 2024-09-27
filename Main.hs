@@ -415,6 +415,7 @@ data AdaException
     | ConnectionFailure
     | InvalidJSON{ bytes :: ByteString, jsonError :: Text }
     | TokenizationFailure{ text :: Text }
+    | EmbeddingFailure{ input :: Vector Text, exception :: ClientError }
     deriving stock (Show)
 
 instance Exception AdaException where
@@ -453,6 +454,20 @@ instance Exception AdaException where
         Text: #{show text}
     |]
 
+    displayException EmbeddingFailure{..} = [__i|
+        Failed to embed text
+
+        One of the following text values:
+
+        #{entries}
+
+        … failed to embed with the following error:
+
+        #{Exception.displayException exception}
+    |]
+      where
+        entries = Text.unlines (map ("• " <>) (Vector.toList input))
+
 healthCheck :: Application -> Application
 healthCheck application request respond
     | Wai.pathInfo request == [ "health" ] = do
@@ -486,7 +501,7 @@ main = Logging.withStderrLogging do
           where
             header = "Bearer " <> openAIAPIKey
 
-    let embed input = do
+    let embed input = Exception.handle handler do
             let embeddingRequest = EmbeddingRequest{..}
                   where
                     model = embeddingModel
@@ -498,6 +513,14 @@ main = Logging.withStderrLogging do
             let combine content Embedding{..} = IndexedContent{..}
 
             return (Vector.zipWith combine input data_)
+          where
+            handler :: ClientError -> ClientM (Vector IndexedContent)
+            handler exception = liftIO do
+                let embeddingFailure = EmbeddingFailure{ input, .. }
+
+                Logging.warn (Text.pack (Exception.displayException embeddingFailure))
+
+                mempty
 
     let prepare = do
             indexedContents <- Serialise.readFileDeserialise store
