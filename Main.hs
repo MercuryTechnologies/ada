@@ -416,7 +416,7 @@ data AdaException
     | ConnectionFailure
     | InvalidJSON{ bytes :: ByteString, jsonError :: Text }
     | TokenizationFailure{ text :: Text }
-    | EmbeddingFailure{ input :: Vector Text, exception :: ClientError }
+    | EmbeddingFailure{ text :: Text, exception :: ClientError }
     deriving stock (Show)
 
 instance Exception AdaException where
@@ -458,26 +458,24 @@ instance Exception AdaException where
     displayException EmbeddingFailure{..} = [__i|
         Failed to embed text
 
-        One of the following text values:
+        The following text value:
 
-        #{entries}
+        #{truncated}
 
         … failed to embed with the following error:
 
         #{Exception.displayException exception}
     |]
       where
-        entries = Text.unlines (map toEntry (Vector.toList input))
-
-        toEntry text
+        truncated
             | len <= 76 = "• \"" <> text <> "\""
             | otherwise = "• \"" <> prefix <> "…" <> suffix <> "\""
           where
             len = Text.length text
 
-            prefix = Text.take 38 text
+            prefix = Text.take 148 text
 
-            suffix = Text.takeEnd 37 text
+            suffix = Text.takeEnd 55 text
 
 healthCheck :: Application -> Application
 healthCheck application request respond
@@ -512,26 +510,31 @@ main = Logging.withStderrLogging do
           where
             header = "Bearer " <> openAIAPIKey
 
-    let embed input = Except.handleError handler do
-            let embeddingRequest = EmbeddingRequest{..}
-                  where
-                    model = embeddingModel
-
-            EmbeddingResponse{..} <- embeddings embeddingRequest
-
-            liftIO (validateEmbeddingResponse data_ input)
-
-            let combine content Embedding{..} = IndexedContent{..}
-
-            return (Vector.zipWith combine input data_)
+    let embed input_ =
+            Except.handleError (\_ -> foldMap embedSingle input_) (embedMultiple input_)
           where
-            handler :: ClientError -> ClientM (Vector IndexedContent)
-            handler exception = liftIO do
-                let embeddingFailure = EmbeddingFailure{ input, .. }
+            embedMultiple input = do
+                let embeddingRequest = EmbeddingRequest{..}
+                      where
+                        model = embeddingModel
 
-                Logging.warn (Text.pack (Exception.displayException embeddingFailure))
+                EmbeddingResponse{..} <- embeddings embeddingRequest
 
-                mempty
+                liftIO (validateEmbeddingResponse data_ input)
+
+                let combine content Embedding{..} = IndexedContent{..}
+
+                return (Vector.zipWith combine input data_)
+
+            embedSingle text = Except.handleError handler do
+                embedMultiple [ text ]
+              where
+                handler exception = liftIO do
+                    let embeddingFailure = EmbeddingFailure{ .. }
+
+                    Logging.warn (Text.pack (Exception.displayException embeddingFailure))
+
+                    mempty
 
     let prepare = do
             indexedContents <- Serialise.readFileDeserialise store
