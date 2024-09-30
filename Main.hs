@@ -72,6 +72,7 @@ import qualified Control.Concurrent as Concurrent
 import qualified Control.Exception.Safe as Exception
 import qualified Control.Logging as Logging
 import qualified Control.Monad as Monad
+import qualified Control.Monad.Except as Except
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as ByteString.Lazy
 import qualified Data.KdTree.Static as KdTree
@@ -501,7 +502,7 @@ main = Logging.withStderrLogging do
           where
             header = "Bearer " <> openAIAPIKey
 
-    let embed input = Exception.handle handler do
+    let embed input = Except.handleError handler do
             let embeddingRequest = EmbeddingRequest{..}
                   where
                     model = embeddingModel

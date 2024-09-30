@@ -31,6 +31,7 @@ executable ada
     , http-types
     , kdt
     , logging
+    , mtl
     , optparse-applicative
     , pretty-show
     , repline
