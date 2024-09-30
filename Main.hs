@@ -72,6 +72,7 @@ import qualified Control.Concurrent as Concurrent
 import qualified Control.Exception.Safe as Exception
 import qualified Control.Logging as Logging
 import qualified Control.Monad as Monad
+import qualified Control.Monad.Except as Except
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as ByteString.Lazy
 import qualified Data.KdTree.Static as KdTree
@@ -415,6 +416,7 @@ data AdaException
     | ConnectionFailure
     | InvalidJSON{ bytes :: ByteString, jsonError :: Text }
     | TokenizationFailure{ text :: Text }
+    | EmbeddingFailure{ input :: Vector Text, exception :: ClientError }
     deriving stock (Show)
 
 instance Exception AdaException where
@@ -453,6 +455,30 @@ instance Exception AdaException where
         Text: #{show text}
     |]
 
+    displayException EmbeddingFailure{..} = [__i|
+        Failed to embed text
+
+        One of the following text values:
+
+        #{entries}
+
+        … failed to embed with the following error:
+
+        #{Exception.displayException exception}
+    |]
+      where
+        entries = Text.unlines (map toEntry (Vector.toList input))
+
+        toEntry text
+            | len <= 76 = "• \"" <> text <> "\""
+            | otherwise = "• \"" <> prefix <> "…" <> suffix <> "\""
+          where
+            len = Text.length text
+
+            prefix = Text.take 38 text
+
+            suffix = Text.takeEnd 37 text
+
 healthCheck :: Application -> Application
 healthCheck application request respond
     | Wai.pathInfo request == [ "health" ] = do
@@ -486,7 +512,7 @@ main = Logging.withStderrLogging do
           where
             header = "Bearer " <> openAIAPIKey
 
-    let embed input = do
+    let embed input = Except.handleError handler do
             let embeddingRequest = EmbeddingRequest{..}
                   where
                     model = embeddingModel
@@ -498,6 +524,14 @@ main = Logging.withStderrLogging do
             let combine content Embedding{..} = IndexedContent{..}
 
             return (Vector.zipWith combine input data_)
+          where
+            handler :: ClientError -> ClientM (Vector IndexedContent)
+            handler exception = liftIO do
+                let embeddingFailure = EmbeddingFailure{ input, .. }
+
+                Logging.warn (Text.pack (Exception.displayException embeddingFailure))
+
+                mempty
 
     let prepare = do
             indexedContents <- Serialise.readFileDeserialise store
