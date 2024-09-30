@@ -60,7 +60,7 @@ computed in two steps:
 - first, an embedding model finds the closest documents in her index related to
   the question
 
-- second, those documents are added to her perompt and a completion model
+- second, those documents are added to her prompt and a completion model
   generates the final answer
 
 This means that her prompt looks like this:
