@@ -467,7 +467,17 @@ instance Exception AdaException where
         #{Exception.displayException exception}
     |]
       where
-        entries = Text.unlines (map ("• " <>) (Vector.toList input))
+        entries = Text.unlines (map toEntry (Vector.toList input))
+
+        toEntry text
+            | len <= 76 = "• \"" <> text <> "\""
+            | otherwise = "• \"" <> prefix <> "…" <> suffix <> "\""
+          where
+            len = Text.length text
+
+            prefix = Text.take 38 text
+
+            suffix = Text.takeEnd 37 text
 
 healthCheck :: Application -> Application
 healthCheck application request respond
