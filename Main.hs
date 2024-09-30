@@ -584,7 +584,9 @@ main = Logging.withStderrLogging do
                 -- package doesn't have a way to lazily iterate over documents
                 -- from nearest to furthest, so we just guess the max number of
                 -- documents we'll ever need, conservatively.
-                let neighbors = KdTree.kNearest kdTree 55 indexedContent
+                let maxDocuments = 55
+
+                let neighbors = KdTree.kNearest kdTree maxDocuments indexedContent
 
                 -- Just like humans, models don't carefully read the entire
                 -- context and usually focus on the beginning and end and skim
@@ -682,7 +684,7 @@ main = Logging.withStderrLogging do
 
                             … which may also be helpful to keep in mind as you answer the question.
 
-                            The following prompt contains a (non-exhaustive) context of up to 15 possibly relevant documents that we've automatically gathered in hopes that they will help you respond, followed by a message containing the actual Slack message from one of our engineers.
+                            The following prompt contains a (non-exhaustive) context of up to #{maxDocuments} possibly relevant documents that we've automatically gathered in hopes that they will help you respond, followed by a message containing the actual Slack message from one of our engineers.
 
                             It's *really important* that you cite your answer using any documents from the following context that you felt were essential to your answer.  The reason we want you to cite your answer is not just so that we can check your work or learn more; we also want to encourage a culture of documentation at Mercury and the more people see that your answers are informed by well-written documentation the more our engineering organization will appreciate and incentivize better documentation.
 
