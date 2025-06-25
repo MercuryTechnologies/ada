@@ -32,9 +32,14 @@ final: prev: {
               final.haskell.lib.dontCheck
                 (final.haskell.lib.unmarkBroken hprev.kdt);
 
+            tiktoken = final.haskell.lib.doJailbreak hprev.tiktoken;
+
             wss-client =
-              final.haskell.lib.unmarkBroken
-                (final.haskell.lib.dontCheck hprev.wss-client);
+              prev.lib.pipe hprev.wss-client [
+                final.haskell.lib.doJailbreak
+                final.haskell.lib.dontCheck
+                final.haskell.lib.unmarkBroken
+              ];
           })
         ];
   });

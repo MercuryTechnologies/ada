@@ -7,7 +7,7 @@
 
     flake-utils.url = "github:numtide/flake-utils/v1.0.0";
 
-    nixpkgs.url = "github:NixOS/nixpkgs/24.05";
+    nixpkgs.url = "github:NixOS/nixpkgs/25.05";
   };
 
   outputs = { flake-utils, nixpkgs, ... }:
